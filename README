@@ -1,0 +1,1 @@
+NOTE: At present there is no MPI support.  If you get compiler or runtime errors referencing MPI, make sure that HAVE_MPI is not defined.
