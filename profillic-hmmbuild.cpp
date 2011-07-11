@@ -22,6 +22,7 @@ extern "C" {
 #include "esl_alphabet.h"
 #include "esl_getopts.h"
 #include "esl_mpi.h"
+// #include "esl_msa.h" // See below.  We now use profillic-esl_msa.hpp
 #include "esl_msaweight.h"
 #include "esl_msacluster.h"
 #include "esl_stopwatch.h"
@@ -123,6 +124,7 @@ typedef struct {
 #endif /*HMMER_THREADS*/
   P7_BG	           *bg;
   P7_BUILDER       *bld;
+  int                     use_priors;
 } WORKER_INFO;
 
 #ifdef HMMER_THREADS
@@ -242,6 +244,8 @@ struct cfg_s {
   int           nproc;		/* how many MPI processes, total */
   int           my_rank;	/* who am I, in 0..nproc-1 */
   int           do_stall;	/* TRUE to stall the program until gdb attaches */
+
+  int           use_priors; /* TRUE except when esl_opt_GetBoolean(go, "--noprior") */
 };
 
 
@@ -252,7 +256,7 @@ static int  init_master_cfg(const ESL_GETOPTS *go, struct cfg_s *cfg, char *errm
 
 static int  serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg);
 template <class ProfileType>
-static int  serial_loop  (WORKER_INFO *info, struct cfg_s *cfg, ProfileType & profile);
+static int  serial_loop  (WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr);
 #ifdef HMMER_THREADS
 static int  thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg);
 static void pipeline_thread(void *arg);
@@ -411,6 +415,8 @@ main(int argc, char **argv)
   cfg.do_stall   = esl_opt_GetBoolean(go, "--stall");
   cfg.hmmName    = esl_opt_GetString(go, "-n"); /* NULL by default */
 
+  cfg.use_priors = !esl_opt_GetBoolean(go, "--noprior");
+
   if (esl_opt_IsOn(go, "--informat")) {
     cfg.fmt = profillic_esl_msa_EncodeFormat(esl_opt_GetString(go, "--informat"));
     if (cfg.fmt == eslMSAFILE_UNKNOWN) p7_Fail("%s is not a recognized input sequence file format\n", esl_opt_GetString(go, "--informat"));
@@ -429,7 +435,7 @@ main(int argc, char **argv)
    * we might be an MPI master, an MPI worker, or a serial program.
    */
 #ifdef HAVE_MPI
-  if (esl_opt_GetBoolean(go, "--mpi"))
+  if (esl_opt_GetBoolean(go, "--mpi")) 
     {
       if( esl_opt_IsUsed(go, "--profillic-amino") || esl_opt_IsUsed(go, "--profillic-dna" ) ) {
         ESL_EXCEPTION(eslEUNIMPLEMENTED, "Sorry, at present the profillic-hmmbuild software can't handle profillic profiles when compiled using MPI.  Please recompile without MPI for profillic support.");
@@ -555,7 +561,7 @@ init_master_cfg(const ESL_GETOPTS *go, struct cfg_s *cfg, char *errmsg)
  * A master can only return if it's successful. All errors are handled immediately and fatally with p7_Fail().
  */
 static int
-serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg )
+serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 {
   int              status;
 
@@ -598,6 +604,7 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg )
       info[i].queue = queue;
       if (ncpus > 0) esl_threads_AddThread(threadObj, &info[i]);
 #endif
+      info[i].use_priors = cfg->use_priors;
     }
 
 #ifdef HMMER_THREADS
@@ -617,26 +624,32 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg )
     }
 #endif
 
-
-
 #ifdef HMMER_THREADS
   if ((( cfg->afp->format != eslMSAFILE_PROFILLIC )) && (ncpus > 0))  status = thread_loop(threadObj, queue, cfg);
-  else  {
+  else if(cfg->fmt = eslMSAFILE_PROFILLIC) {
     if( cfg->abc->type == eslDNA ) {
       galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> profile;
-      status = serial_loop(info, cfg, profile);
+      status = serial_loop(info, cfg, &profile);
     } else if( cfg->abc->type == eslAMINO ) {
       galosh::ProfileTreeRoot<seqan::AminoAcid20, floatrealspace> profile;
-      status = serial_loop(info, cfg, profile);
+      status = serial_loop(info, cfg, &profile);
     } else {
       ESL_EXCEPTION(eslEUNIMPLEMENTED, "Sorry, at present the profillic-hmmbuild software can only handle amino and dna.");
     }
+  } else {
+    status = serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL);
   }
 #else
-  if( cfg->abc->type == eslDNA ) {
-    status = serial_loop(info, cfg, profile);
-  } else if( cfg->abc->type == eslAMINO ) {
-    status = serial_loop(info, cfg, profile);
+  if( cfg->fmt = eslMSAFILE_PROFILLIC ) {
+    if( cfg->abc->type == eslDNA ) {
+      galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> profile;
+      status = serial_loop(info, cfg, &profile);
+    } else if( cfg->abc->type == eslAMINO ) {
+      galosh::ProfileTreeRoot<seqan::AminoAcid20, floatrealspace> profile;
+      status = serial_loop(info, cfg, &profile);
+    }
+  } else {
+    status = serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL);
   }
 #endif
 
@@ -896,12 +909,11 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
   ESL_DPRINTF2(("worker %d: initialized\n", cfg->my_rank));
 
                       /* source = 0 (master); tag = 0 */
-  // TODO: Support MPI-receiving the profile too...
   while (esl_msa_MPIRecv(0, 0, MPI_COMM_WORLD, cfg->abc, &wbuf, &wn, &msa) == eslOK) 
     {
       /* Build the HMM */
       ESL_DPRINTF2(("worker %d: has received MSA %s (%d columns, %d seqs)\n", cfg->my_rank, msa->name, msa->alen, msa->nseq));
-      if ((status = p7_Builder(bld, msa, bg, &hmm, NULL, NULL, NULL, postmsa_ptr)) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
+      if ((status = profillic_p7_Builder(bld, msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, bg, &hmm, NULL, NULL, NULL, postmsa_ptr), cfg->use_priors) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
 
       ESL_DPRINTF2(("worker %d: has produced an HMM %s\n", cfg->my_rank, hmm->name));
 
@@ -947,7 +959,7 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
 
 template <class ProfileType>
 static int
-serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType & profile)
+serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr)
 {
   P7_BUILDER *bld         = NULL;
   ESL_MSA    *msa         = NULL;
@@ -961,19 +973,13 @@ serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType & profile)
 
   cfg->nali = 0;
   // Note weird hack to make sure we only try to read the profile in once.  TODO: Why doesn't EOF signal it?
-  while ( ( ( cfg->afp->format == eslMSAFILE_PROFILLIC) ? ( cfg->nali == 0 ) : 1 ) && ( (status = profillic_esl_msa_Read(cfg->afp, &msa, profile)) == eslOK) )
+  while ( ( ( cfg->afp->format == eslMSAFILE_PROFILLIC) ? ( cfg->nali == 0 ) : 1 ) && ( (status = profillic_esl_msa_Read(cfg->afp, &msa, profile_ptr)) == eslOK) )
     {
       cfg->nali++;  
 
       if ((status = set_msa_name(cfg, errmsg, msa)) != eslOK) p7_Fail("%s\n", errmsg); /* cfg->nnamed gets incremented in this call */
 
-      if( cfg->afp->format == eslMSAFILE_PROFILLIC ) {
-        // Build from a galosh profile (from profillic)
-        if ((status = profillic_p7_Builder(info->bld, msa, profile, info->bg, &hmm, NULL, NULL, postmsa_ptr)) != eslOK) p7_Fail("build from profillic failed: %s", bld->errbuf);
-      } else {
-                /*         bg   new-HMM trarr gm   om  */
-        if ((status = p7_Builder(info->bld, msa, info->bg, &hmm, NULL, NULL, NULL, postmsa_ptr)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
-      }
+      if ((status = profillic_p7_Builder(info->bld, msa, profile_ptr, info->bg, &hmm, NULL, NULL, NULL, postmsa_ptr, info->use_priors)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
 
       entropy = p7_MeanMatchRelativeEntropy(hmm, info->bg);
       if ((status = output_result(cfg, errmsg, cfg->nali, msa, hmm, postmsa, entropy))         != eslOK) p7_Fail(errmsg);
@@ -1151,7 +1157,7 @@ pipeline_thread(void *arg)
   item = (WORK_ITEM *) newItem;
   while (item->msa != NULL)
     {
-      status = p7_Builder(info->bld, item->msa, info->bg, &item->hmm, NULL, NULL, NULL, &item->postmsa);
+      status = profillic_p7_Builder(info->bld, item->msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, info->bg, &item->hmm, NULL, NULL, NULL, &item->postmsa, info->use_priors);
       if (status != eslOK) p7_Fail("build failed: %s", info->bld->errbuf);
 
       item->entropy   = p7_MeanMatchRelativeEntropy(item->hmm, info->bg);

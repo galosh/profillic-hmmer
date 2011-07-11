@@ -3,7 +3,7 @@
 # command line.  Makefiles should not set these.  These variables are
 # for C/C++ compilation, and linking.
 ## -pg is for use with gprof.  Use on CFLAGS and on LDFLAGS
-#CFLAGS		= -Wall -pg
+CFLAGS		= -w
 #CFLAGS         = -Winline
 #JFLAGS		=
 #LDFLAGS	= -pg
@@ -38,17 +38,15 @@ BOOST_LDFLAGS 	= -L./boost-lib
 BOOST_LIBS	= -lboost_serialization -lboost_graph -lboost_filesystem -lboost_system
 
 #========================================
-### Paul added these for HMMER3 (and easel) support (optional)
-HMMER3_CFLAGS 	= -I./hmmer3/src -I./hmmer3/easel
-HMMER3_LDFLAGS 	= -L./hmmer3/src -L./hmmer3/easel -L./hmmer3/src/impl
+### Paul added these for HMMER 3.0 (and easel) support (required):
+HMMER3_CFLAGS 	= -I./hmmer-3.0/src -I./hmmer-3.0/easel
+HMMER3_LDFLAGS 	= -L./hmmer-3.0/src -L./hmmer-3.0/easel -L./hmmer-3.0/src/impl
 HMMER3_LIBS	= -leasel -lhmmer -lhmmerimpl
 #HMMER3_CFLAGS 	=
 #HMMER3_LDFLAGS 	=
 #HMMER3_LIBS	=
 
 ###==============================================
-
-INCS =
 
 PROFILLIC_HMMBUILD_INCS = profillic-hmmer.hpp \
 profillic-p7_builder.hpp \
@@ -58,19 +56,64 @@ PROFILLIC_HMMBUILD_OBJS = profillic-hmmbuild.o
 
 PROFILLIC_HMMBUILD_SOURCES = profillic-hmmbuild.cpp
 
+
+PROFILLIC_HMMTOPROFILE_INCS = profillic-hmmer.hpp
+
+PROFILLIC_HMMTOPROFILE_OBJS = profillic-hmmtoprofile.o
+
+PROFILLIC_HMMTOPROFILE_SOURCES = profillic-hmmtoprofile.cpp
+
+
+PROFILLIC_HMMCALIBRATE_INCS = profillic-hmmer.hpp
+
+PROFILLIC_HMMCALIBRATE_OBJS = profillic-hmmcalibrate.o
+
+PROFILLIC_HMMCALIBRATE_SOURCES = profillic-hmmcalibrate.cpp
+
+
+PROFILLIC_HMMUNIFYTRANSITIONS_INCS = profillic-hmmer.hpp
+
+PROFILLIC_HMMUNIFYTRANSITIONS_OBJS = profillic-hmmunifytransitions.o
+
+PROFILLIC_HMMUNIFYTRANSITIONS_SOURCES = profillic-hmmunifytransitions.cpp
+
+
+PROFILLIC_HMMCOPYTRANSITIONS_INCS = profillic-hmmer.hpp
+
+PROFILLIC_HMMCOPYTRANSITIONS_OBJS = profillic-hmmcopytransitions.o
+
+PROFILLIC_HMMCOPYTRANSITIONS_SOURCES = profillic-hmmcopytransitions.cpp
+
+
 default: all
 
 profillic-hmmbuild: $(PROFILLIC_HMMBUILD_SOURCES) $(PROFILLIC_HMMBUILD_INCS) $(PROFILLIC_HMMBUILD_OBJS) $(MUSCLE_CPPOBJ)
 	     $(CXX_LINK) -o profillic-hmmbuild $(PROFILLIC_HMMBUILD_OBJS) $(MUSCLE_CPPOBJ)
 
-all: profillic-hmmbuild
+profillic-hmmtoprofile: $(PROFILLIC_HMMTOPROFILE_SOURCES) $(PROFILLIC_HMMTOPROFILE_INCS) $(PROFILLIC_HMMTOPROFILE_OBJS) $(MUSCLE_CPPOBJ)
+	     $(CXX_LINK) -o profillic-hmmtoprofile $(PROFILLIC_HMMTOPROFILE_OBJS) $(MUSCLE_CPPOBJ)
+
+profillic-hmmcalibrate: $(PROFILLIC_HMMCALIBRATE_SOURCES) $(PROFILLIC_HMMCALIBRATE_INCS) $(PROFILLIC_HMMCALIBRATE_OBJS) $(MUSCLE_CPPOBJ)
+	     $(CXX_LINK) -o profillic-hmmcalibrate $(PROFILLIC_HMMCALIBRATE_OBJS) $(MUSCLE_CPPOBJ)
+
+profillic-hmmunifytransitions: $(PROFILLIC_HMMUNIFYTRANSITIONS_SOURCES) $(PROFILLIC_HMMUNIFYTRANSITIONS_INCS) $(PROFILLIC_HMMUNIFYTRANSITIONS_OBJS) $(MUSCLE_CPPOBJ)
+	     $(CXX_LINK) -o profillic-hmmunifytransitions $(PROFILLIC_HMMUNIFYTRANSITIONS_OBJS) $(MUSCLE_CPPOBJ)
+
+profillic-hmmcopytransitions: $(PROFILLIC_HMMCOPYTRANSITIONS_SOURCES) $(PROFILLIC_HMMCOPYTRANSITIONS_INCS) $(PROFILLIC_HMMCOPYTRANSITIONS_OBJS) $(MUSCLE_CPPOBJ)
+	     $(CXX_LINK) -o profillic-hmmcopytransitions $(PROFILLIC_HMMCOPYTRANSITIONS_OBJS) $(MUSCLE_CPPOBJ)
+
+all: profillic-hmmbuild profillic-hmmtoprofile profillic-hmmcalibrate profillic-hmmunifytransitions profillic-hmmcopytransitions
 
 ## Recompile if the includes are modified ...
 $(PROFILLIC_HMMBUILD_OBJS): $(PROFILLIC_HMMBUILD_SOURCES) $(PROFILLIC_HMMBUILD_INCS)
+$(PROFILLIC_HMMTOPROFILE_OBJS): $(PROFILLIC_HMMTOPROFILE_SOURCES) $(PROFILLIC_HMMTOPROFILE_INCS)
+$(PROFILLIC_HMMCALIBRATE_OBJS): $(PROFILLIC_HMMCALIBRATE_SOURCES) $(PROFILLIC_HMMCALIBRATE_INCS)
+$(PROFILLIC_HMMUNIFYTRANSITIONS_OBJS): $(PROFILLIC_HMMUNIFYTRANSITIONS_SOURCES) $(PROFILLIC_HMMUNIFYTRANSITIONS_INCS)
+$(PROFILLIC_HMMCOPYTRANSITIONS_OBJS): $(PROFILLIC_HMMCOPYTRANSITIONS_SOURCES) $(PROFILLIC_HMMCOPYTRANSITIONS_INCS)
 
 .PHONY: clean
 clean:
-	rm -f profillic-hmmbuild $(PROFILLIC_HMMBUILD_OBJS)
+	rm -f profillic-hmmbuild profillic-hmmtoprofile profillic-hmmcalibrate profillic-hmmunifytransitions profillic-hmmcopytransitions $(PROFILLIC_HMMBUILD_OBJS) $(PROFILLIC_HMMTOPROFILE_OBJS) $(PROFILLIC_HMMCALIBRATE_OBJS) $(PROFILLIC_HMMUNIFYTRANSITIONS_OBJS) $(PROFILLIC_HMMCOPYTRANSITIONS_OBJS)
 
 #========================================
 # FILE EXTENSIONS.  Extensions and prefixes for different types of

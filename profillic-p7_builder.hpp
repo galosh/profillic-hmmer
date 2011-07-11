@@ -148,10 +148,14 @@ profillic_p7_builder_Create(const ESL_GETOPTS *go, const ESL_ALPHABET *abc)
   bld->r            = esl_randomness_CreateFast(seed);
   bld->do_reseeding = (seed == 0) ? FALSE : TRUE;
 
-  if(esl_opt_GetBoolean(go, "--laplace")) {
+  if(esl_opt_GetBoolean(go, "--noprior") || esl_opt_GetBoolean(go, "--laplace")) {
+    // NOTE: we need the prior to be initialized for the rest of the
+    // code to work.  A laplace prior (eg a dirichlet with all "1"s)
+    // should have no effect in most cases.  See below in
+    // profillic_parameterize(..) where we ask the caller to specify
+    // whether a prior should be used or not for that step
+    // (determined, presumably by --noprior).
     bld->prior = p7_prior_CreateLaplace(abc);
-  } else if(esl_opt_GetBoolean(go, "--noprior")) {
-    bld->prior = NULL;
   } else {
     switch (abc->type) {
     case eslAMINO: bld->prior = p7_prior_CreateAmino();      break;
@@ -160,6 +164,7 @@ profillic_p7_builder_Create(const ESL_GETOPTS *go, const ESL_ALPHABET *abc)
     default:       bld->prior = p7_prior_CreateLaplace(abc); break;
     }
   }
+  if (bld->prior == NULL) goto ERROR;
 
   bld->abc       = abc;
   bld->errbuf[0] = '\0';
@@ -168,6 +173,101 @@ profillic_p7_builder_Create(const ESL_GETOPTS *go, const ESL_ALPHABET *abc)
  ERROR:
   profillic_p7_builder_Destroy(bld);
   return NULL;
+}
+
+
+
+
+/* Function:  p7_builder_SetScoreSystem()
+ * Synopsis:  Initialize score system for single sequence queries.
+ * Incept:    SRE, Fri Dec 12 10:04:36 2008 [Janelia]
+ *
+ * Purpose:   Initialize the builder <bld> to be able to parameterize
+ *            single sequence queries.
+ *            
+ *            Read a standard substitution score matrix from file
+ *            <mxfile>. If <mxfile> is <NULL>, default to BLOSUM62
+ *            scores. If <mxfile> is "-", read score matrix from
+ *            <stdin> stream. If <env> is non-<NULL> and <mxfile> is
+ *            not found in the current working directory, look for
+ *            <mxfile> in colon-delimited directory list contained in
+ *            environment variable <env>.
+ *            
+ *            Set the gap-open and gap-extend probabilities to
+ *            <popen>, <pextend>, respectively.
+ *
+ *
+ * Args:      bld      - <P7_BUILDER> to initialize
+ *            mxfile   - score matrix file to use, or NULL for BLOSUM62 default
+ *            env      - env variable containing directory list where <mxfile> may reside
+ *            popen    - gap open probability
+ *            pextend  - gap extend probability
+ *
+ * Returns:   <eslOK> on success.
+ *            
+ *            <eslENOTFOUND> if <mxfile> can't be found or opened, even
+ *            in any of the directories specified by the <env> variable.   
+ *            
+ *            <eslEINVAL> if the score matrix can't be converted into
+ *            conditional probabilities by the Yu and Altschul method,
+ *            either because it isn't a symmetric matrix or because
+ *            the Yu/Altschul numerical method fails to converge. 
+ * 
+ *            On either error, <bld->errbuf> contains a useful error message
+ *            for the user.
+ *
+ * Throws:    <eslEMEM> on allocation failure.
+ */
+int
+p7_builder_SetScoreSystem(P7_BUILDER *bld, const char *mxfile, const char *env, double popen, double pextend)
+{
+  ESL_FILEPARSER  *efp      = NULL;
+  double          *fa       = NULL;
+  double          *fb       = NULL;
+  double           slambda;
+  int              a,b;
+  int              status;
+
+
+  bld->errbuf[0] = '\0';
+
+  /* If a score system is already set, delete it. */
+  if (bld->S != NULL) esl_scorematrix_Destroy(bld->S);
+  if (bld->Q != NULL) esl_dmatrix_Destroy(bld->Q);
+
+  /* Get the scoring matrix */
+  if ((bld->S  = esl_scorematrix_Create(bld->abc)) == NULL) { status = eslEMEM; goto ERROR; }
+  if (mxfile == NULL) 
+    {
+      if ((status = esl_scorematrix_SetBLOSUM62(bld->S)) != eslOK) goto ERROR;
+    } 
+  else 
+    {
+      if ((status = esl_fileparser_Open(mxfile, env, &efp)) != eslOK) ESL_XFAIL(status, bld->errbuf, "Failed to find or open matrix file %s", mxfile);
+      if ((status = esl_sco_Read(efp, bld->abc, &(bld->S))) != eslOK) ESL_XFAIL(status, bld->errbuf, "Failed to read matrix from %s:\n%s", mxfile, efp->errbuf);
+      esl_fileparser_Close(efp); efp = NULL;
+    }
+  if (! esl_scorematrix_IsSymmetric(bld->S)) 
+    ESL_XFAIL(eslEINVAL, bld->errbuf, "Matrix isn't symmetric");
+  if ((status = esl_sco_Probify(bld->S, &(bld->Q), &fa, &fb, &slambda)) != eslOK) 
+    ESL_XFAIL(eslEINVAL, bld->errbuf, "Yu/Altschul method failed to backcalculate probabilistic basis of score matrix");
+
+  for (a = 0; a < bld->abc->K; a++)
+    for (b = 0; b < bld->abc->K; b++)
+      bld->Q->mx[a][b] /= fa[a];	/* Q->mx[a][b] is now P(b | a) */
+
+  bld->popen   = popen;
+  bld->pextend = pextend;
+
+  free(fa);
+  free(fb);
+  return eslOK;
+
+ ERROR:
+  if (efp != NULL) esl_fileparser_Close(efp);
+  if (fa  != NULL) free(fa);
+  if (fb  != NULL) free(fb);
+  return status;
 }
 
 
@@ -199,12 +299,12 @@ profillic_p7_builder_Destroy(P7_BUILDER *bld)
  * 2. Standardized model construction API.
  *****************************************************************/
 
-//static int    validate_msa         (P7_BUILDER *bld, ESL_MSA *msa);
-//static int    relative_weights     (P7_BUILDER *bld, ESL_MSA *msa);
+static int    validate_msa         (P7_BUILDER *bld, ESL_MSA *msa);
+static int    relative_weights     (P7_BUILDER *bld, ESL_MSA *msa);
 template <class ProfileType>
-static int    profillic_build_model          (P7_BUILDER *bld, const ESL_MSA *msa, ProfileType const & profile, P7_HMM **ret_hmm);
+static int    profillic_build_model          (P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile, P7_HMM **ret_hmm, P7_TRACE ***opt_tr);
 static int    effective_seqnumber  (P7_BUILDER *bld, const ESL_MSA *msa, P7_HMM *hmm, const P7_BG *bg);
-static int    profillic_parameterize         (P7_BUILDER *bld, P7_HMM *hmm);
+static int    profillic_parameterize         (P7_BUILDER *bld, P7_HMM *hmm, int const use_priors);
 static int    annotate             (P7_BUILDER *bld, const ESL_MSA *msa, P7_HMM *hmm);
 static int    calibrate            (P7_BUILDER *bld, P7_HMM *hmm, P7_BG *bg, P7_PROFILE **opt_gm, P7_OPROFILE **opt_om);
 static int    make_post_msa        (P7_BUILDER *bld, const ESL_MSA *premsa, const P7_HMM *hmm, P7_TRACE **tr, ESL_MSA **opt_postmsa);
@@ -220,16 +320,18 @@ static int    make_post_msa        (P7_BUILDER *bld, const ESL_MSA *premsa, cons
  *            additionally providing a null model <bg>.
  *
  * Args:      bld         - build configuration
- *            msa         - multiple sequence alignment (just one seq: the consensus).
+ *            msa         - multiple sequence alignment (or possibly just the profillic consensus).
  *            profile     - the galosh profile (from profillic) to use the build the model
  *            bg          - null model
  *            opt_hmm     - optRETURN: new HMM
+ *            opt_trarr   - optRETURN: array of faux tracebacks, <0..nseq-1>
+ *            opt_postmsa - optRETURN: RF-annotated, possibly modified MSA 
  *            opt_gm      - optRETURN: profile corresponding to <hmm>
  *            opt_om      - optRETURN: optimized profile corresponding to <gm>
- *            opt_postmsa - optRETURN: RF-annotated, possibly modified MSA 
  *
  * Returns:   <eslOK> on success. The new HMM is optionally returned in
- *            <*opt_hmm>, the annotated MSA used to construct
+ *            <*opt_hmm>, along with optional returns of an array of faux tracebacks
+ *            for each sequence in <*opt_trarr>, the annotated MSA used to construct
  *            the model in <*opt_postmsa>, a configured search profile in 
  *            <*opt_gm>, and an optimized search profile in <*opt_om>. These are
  *            all optional returns because the caller may, for example, be interested
@@ -247,32 +349,34 @@ static int    make_post_msa        (P7_BUILDER *bld, const ESL_MSA *premsa, cons
  */
 template <class ProfileType>
 int
-profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile, P7_BG *bg,
-	   P7_HMM **opt_hmm, P7_PROFILE **opt_gm, P7_OPROFILE **opt_om,
-	   ESL_MSA **opt_postmsa)
+profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const * const profile_ptr, P7_BG *bg,
+	   P7_HMM **opt_hmm, P7_TRACE ***opt_trarr, P7_PROFILE **opt_gm, P7_OPROFILE **opt_om,
+                     ESL_MSA **opt_postmsa, int const use_priors)
 {
   uint32_t    checksum = 0;	/* checksum calculated for the input MSA. hmmalign --mapali verifies against this. */
   P7_HMM     *hmm      = NULL;
   P7_TRACE  **tr       = NULL;
-  P7_TRACE ***tr_ptr   = (opt_postmsa != NULL) ? &tr : NULL;
+  P7_TRACE ***tr_ptr   = (opt_trarr != NULL || opt_postmsa != NULL) ? &tr : NULL;
   int         status;
 
-  // This checks the alignment for "missing data chars" ('~'), which is not relevant to a profillic profile.
-  //if ((status =  validate_msa         (bld, msa))                       != eslOK) goto ERROR;
+  // NOTE: This checks the alignment for "missing data chars" ('~'), which is not relevant to a profillic profile consensus, but should be fine to call.
+  if ((status =  validate_msa         (bld, msa))                       != eslOK) goto ERROR;
 
-  // The following creates hashcode from the msa (in our case, the consensus sequence only!):
-  // TODO: Consider altering this to create a checksum from the full Profile HMM somehow.
+  // The following creates hashcode from the msa (or the consensus sequence of the galosh profile):
+  // TODO [profillic]: Consider altering this to create a checksum from the full Profile HMM somehow.
   if ((status =  esl_msa_Checksum     (msa, &checksum))                 != eslOK) ESL_XFAIL(status, bld->errbuf, "Failed to calculate checksum"); 
 
-  // For now, let's not use this.  In the future, when we read in both an msa (viterbi alignments, perhaps .. or random alignment draws) and a profile, then we can use this for the msa.
-  // if ((status =  relative_weights     (bld, msa))                       != eslOK) goto ERROR;
+  // NOTE: For now, we don't use this with profillic.  In the future, when we read in both an msa (viterbi alignments, perhaps .. or random alignment draws) and a profile, then we can use this for the msa.
+  if( msa->nseq > 1 ) {
+    if ((status =  relative_weights     (bld, msa))                       != eslOK) goto ERROR;
+  }
 
-  // Cool: this identifies "sequence fragments" as having length less than <fragthresh> times the profile length, and converts leading and trailing gaps into missing-data chars.
-  //if ((status =  esl_msa_MarkFragments(msa, bld->fragthresh))           != eslOK) goto ERROR;
+  // NOTE: this identifies "sequence fragments" as having length less than <fragthresh> times the profile length, and converts leading and trailing gaps into missing-data chars.
+  if ((status =  esl_msa_MarkFragments(msa, bld->fragthresh))           != eslOK) goto ERROR;
 
-  if ((status =  profillic_build_model          (bld, msa, profile, &hmm))         != eslOK) goto ERROR;
+  if ((status =  profillic_build_model          (bld, msa, profile_ptr, &hmm, tr_ptr))         != eslOK) goto ERROR;
   if ((status =  effective_seqnumber  (bld, msa, hmm, bg))              != eslOK) goto ERROR;
-  if ((status =  profillic_parameterize         (bld, hmm))                       != eslOK) goto ERROR;
+  if ((status =  profillic_parameterize (bld, hmm, use_priors))          != eslOK) goto ERROR;
   if ((status =  annotate             (bld, msa, hmm))                  != eslOK) goto ERROR;
   if ((status =  calibrate            (bld, hmm, bg, opt_gm, opt_om))   != eslOK) goto ERROR;
   if ((status =  make_post_msa        (bld, msa, hmm, tr, opt_postmsa)) != eslOK) goto ERROR;
@@ -281,7 +385,7 @@ profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile,
   hmm->flags   |= p7H_CHKSUM;
 
   if (opt_hmm   != NULL) *opt_hmm   = hmm; else p7_hmm_Destroy(hmm);
-  p7_trace_DestroyArray(tr, msa->nseq);
+  if (opt_trarr != NULL) *opt_trarr = tr;  else p7_trace_DestroyArray(tr, msa->nseq);
   return eslOK;
 
  ERROR:
@@ -291,6 +395,71 @@ profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile,
   if (opt_om    != NULL) p7_oprofile_Destroy(*opt_om);
   return status;
 }
+
+
+/* Function:  p7_SingleBuilder()
+ * Synopsis:  Build a new HMM from a single sequence.
+ * Incept:    SRE, Fri Dec 12 10:52:45 2008 [Janelia]
+ *
+ * Purpose:   Take the sequence <sq> and a build configuration <bld>, and
+ *            build a new HMM.
+ *            
+ *            The single sequence scoring system in the <bld>
+ *            configuration must have been previously initialized by
+ *            <p7_builder_SetScoreSystem()>.
+ *            
+ * Args:      bld       - build configuration
+ *            sq        - query sequence
+ *            bg        - null model (needed to paramaterize insert emission probs)
+ *            opt_hmm   - optRETURN: new HMM
+ *            opt_gm    - optRETURN: profile corresponding to <hmm>
+ *            opt_om    - optRETURN: optimized profile corresponding to <gm>
+ *
+ * Returns:   <eslOK> on success.
+ *
+ * Throws:    <eslEMEM> on allocation error.
+ *            <eslEINVAL> if <bld> isn't properly configured somehow.
+ */
+int
+p7_SingleBuilder(P7_BUILDER *bld, ESL_SQ *sq, P7_BG *bg, P7_HMM **opt_hmm,
+		 P7_TRACE **opt_tr, P7_PROFILE **opt_gm, P7_OPROFILE **opt_om)
+{
+  P7_HMM   *hmm = NULL;
+  P7_TRACE *tr  = NULL;
+  int       k;
+  int       status;
+  
+  bld->errbuf[0] = '\0';
+  if (! bld->Q) ESL_XEXCEPTION(eslEINVAL, "score system not initialized");
+
+  if ((status = p7_Seqmodel(bld->abc, sq->dsq, sq->n, sq->name, bld->Q, bg->f, bld->popen, bld->pextend, &hmm)) != eslOK) goto ERROR;
+  if ((status = calibrate(bld, hmm, bg, opt_gm, opt_om))                                                        != eslOK) goto ERROR;
+
+  /* build a faux trace: relative to core model (B->M_1..M_L->E) */
+  if (opt_tr != NULL) 
+    {
+      if ((tr = p7_trace_Create())                      == NULL)  goto ERROR;
+      if ((status = p7_trace_Append(tr, p7T_B, 0, 0))   != eslOK) goto ERROR; 
+      for (k = 1; k <= sq->n; k++)
+	if ((status = p7_trace_Append(tr, p7T_M, k, k)) != eslOK) goto ERROR;
+      if ((status = p7_trace_Append(tr, p7T_E, 0, 0))   != eslOK) goto ERROR; 
+      tr->M = sq->n;
+      tr->L = sq->n;
+    }
+
+  if (opt_hmm   != NULL) *opt_hmm = hmm; else p7_hmm_Destroy(hmm);
+  if (opt_tr    != NULL) *opt_tr  = tr;
+  return eslOK;
+
+ ERROR:
+  p7_hmm_Destroy(hmm);
+  if (tr        != NULL) p7_trace_Destroy(tr);
+  if (opt_gm    != NULL) p7_profile_Destroy(*opt_gm);
+  if (opt_om    != NULL) p7_oprofile_Destroy(*opt_om);
+  return status;
+}
+/*------------- end, model construction API ---------------------*/
+
 
 
 
@@ -312,43 +481,44 @@ profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile,
  * 
  * This validation step costs negligible time.
  */
-//static int
-//validate_msa(P7_BUILDER *bld, ESL_MSA *msa)
-//{
-//  int     idx;
-//  int64_t apos;
-//
-//  for (idx = 0; idx < msa->nseq; idx++)
-//    {
-//      apos = 1;
-//      while (  esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
-//      while (! esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
-//      while (  esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
-//      if (apos != msa->alen+1) ESL_FAIL(eslEINVAL, bld->errbuf, "msa %s; sequence %s\nhas missing data chars (~) other than at fragment edges", msa->name, msa->sqname[idx]);
-//    }
-//  
-//  return eslOK;
-//}
+static int
+validate_msa(P7_BUILDER *bld, ESL_MSA *msa)
+{
+  int     idx;
+  int64_t apos;
+
+  for (idx = 0; idx < msa->nseq; idx++)
+    {
+      apos = 1;
+      while (  esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
+      while (! esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
+      while (  esl_abc_XIsMissing(msa->abc, msa->ax[idx][apos]) && apos <= msa->alen) apos++;
+      if (apos != msa->alen+1) ESL_FAIL(eslEINVAL, bld->errbuf, "msa %s; sequence %s\nhas missing data chars (~) other than at fragment edges", msa->name, msa->sqname[idx]);
+    }
+  
+  return eslOK;
+}
 
 
 /* set_relative_weights():
  * Set msa->wgt vector, using user's choice of relative weighting algorithm.
  */
-//static int
-//relative_weights(P7_BUILDER *bld, ESL_MSA *msa)
-//{
-//  int status = eslOK;
-//
-//  if      (bld->wgt_strategy == p7_WGT_NONE)                    { esl_vec_DSet(msa->wgt, msa->nseq, 1.); }
-//  else if (bld->wgt_strategy == p7_WGT_GIVEN)                   ;
-//  else if (bld->wgt_strategy == p7_WGT_PB)                      status = esl_msaweight_PB(msa); 
-//  else if (bld->wgt_strategy == p7_WGT_GSC)                     status = esl_msaweight_GSC(msa); 
-//  else if (bld->wgt_strategy == p7_WGT_BLOSUM)                  status = esl_msaweight_BLOSUM(msa, bld->wid); 
-//  else ESL_EXCEPTION(eslEINCONCEIVABLE, "no such weighting strategy");
-//
-//  if (status != eslOK) ESL_FAIL(status, bld->errbuf, "failed to set relative weights in alignment");
-//  return eslOK;
-//}
+static int
+relative_weights(P7_BUILDER *bld, ESL_MSA *msa)
+{
+  int status = eslOK;
+
+  if      (bld->wgt_strategy == p7_WGT_NONE)                    { esl_vec_DSet(msa->wgt, msa->nseq, 1.); }
+  else if (bld->wgt_strategy == p7_WGT_GIVEN)                   ;
+  else if (bld->wgt_strategy == p7_WGT_PB)                      status = esl_msaweight_PB(msa); 
+  else if (bld->wgt_strategy == p7_WGT_GSC)                     status = esl_msaweight_GSC(msa); 
+  else if (bld->wgt_strategy == p7_WGT_BLOSUM)                  status = esl_msaweight_BLOSUM(msa, bld->wid); 
+  else ESL_EXCEPTION(eslEINCONCEIVABLE, "no such weighting strategy");
+
+  if (status != eslOK) ESL_FAIL(status, bld->errbuf, "failed to set relative weights in alignment");
+  return eslOK;
+}
+
 
 /* build_model():
  * Given <msa>, choose HMM architecture, collect counts;
@@ -357,7 +527,7 @@ profillic_p7_Builder(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const & profile,
  */
 template <typename ProfileType>
 static int
-profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profile, P7_HMM **ret_hmm)
+profillic_p7_Profillicmodelmaker(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profile, P7_HMM **ret_hmm)
 {
   typedef typename galosh::profile_traits<ProfileType>::ResidueType ResidueType;
 
@@ -368,7 +538,6 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
   char errbuf[eslERRBUFSIZE];
 
   uint32_t pos_i; // Position in profile.  Corresponds to one less than match state pos in HMM.
-  const ResidueType canonical_residue;
   uint32_t res_i;
   ESL_DSQ hmmer_digitized_residue;
 
@@ -376,7 +545,16 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
   M = static_cast<int>( profile.length() );
   if (M == 0) { status = eslENORESULT; goto ERROR; }
 
-  //if ((status = p7_trace_FauxFromMSA(msa, matassign, p7_MSA_COORDS, tr))        != eslOK) goto ERROR;
+  // NOTE that HMMER3 has a slightly different model, starting in
+  // Begin rather than in preAlign, and with 3 legal transitions out
+  // of Begin (one of these is to PreAlign).  The galosh profile model
+  // begins in preAlign and transitions to Begin, and from there to
+  // either Match or Delete.  One implication is that galosh profiles
+  // enforce t[ 0 ][ p7H_MI ] to be the same as t[ 0 ][ p7H_II ], but
+  // HMMER3 does not.  Another way to say this is that H3 uses affine
+  // pre-aligns, and prohibits pre-align -to- delete transitions,
+  // whereas galosh / profillic uses non-affine pre-aligns and allows
+  // pre-align->delete.
 
   /* Build count model from profile */
   if ((hmm    = p7_hmm_Create(M, msa->abc)) == NULL)  { status = eslEMEM; goto ERROR; }
@@ -388,22 +566,18 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
 
   // fromPreAlign
   hmm->t[ 0 ][ p7H_MI ] =
-   // See below where it says "TODO/NOTE"..
-   toDouble(
-      profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toPreAlign ] +
-      profile[ galosh::Transition::fromPostAlign ][ galosh::TransitionFromPostAlign::toPostAlign ]
-   ) / 2.0;
+     toDouble(
+      profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toPreAlign ]
+    );
   hmm->t[ 0 ][ p7H_II ] =  hmm->t[ 0 ][ p7H_MI ];
   hmm->t[ 0 ][ p7H_IM ] = ( 1 - hmm->t[ 0 ][ p7H_MI ] );
   for( res_i = 0; res_i < seqan::ValueSize<ResidueType>::VALUE; res_i++ ) {
     hmmer_digitized_residue =
       esl_abc_DigitizeSymbol( msa->abc, static_cast<char>( ResidueType( res_i ) ) );
-    // See below where it says "TODO/NOTE"..
     hmm->ins[ 0 ][ hmmer_digitized_residue ] =
        toDouble(
-        profile[ galosh::Emission::PreAlignInsertion ][ res_i ] +
-        profile[ galosh::Emission::PostAlignInsertion ][ res_i ]
-       ) / 2.0;
+        profile[ galosh::Emission::PreAlignInsertion ][ res_i ]
+       );
   }
 
   // fromBegin
@@ -440,13 +614,10 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
         );
       if( pos_i == ( profile.length() - 1 ) ) {
         // Use post-align insertions
-
-        // See below where it says "TODO/NOTE"..
         hmm->ins[ pos_i + 1 ][ hmmer_digitized_residue ] =
           toDouble(
-            profile[ galosh::Emission::PreAlignInsertion ][ res_i ] +
             profile[ galosh::Emission::PostAlignInsertion ][ res_i ]
-          ) / 2.0;
+          );
         assert( hmm->ins[ pos_i + 1 ][ hmmer_digitized_residue ] == hmm->ins[ 0 ][ hmmer_digitized_residue ] );
       } else { // if this is the last position (use post-align insertions) .. else ..
         hmm->ins[ pos_i + 1 ][ hmmer_digitized_residue ] =
@@ -457,40 +628,28 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
     } // End foreach res_i
     if( pos_i == ( profile.length() - 1 ) ) {
       // Use post-align insertions
-  
-      // TODO/NOTE: It seems to me that there is a separation here
-      // between last-M to C (post-align) and C->C, but it seems to
-      // me that last-M to C should be the same as C to C.  Also, it
-      // seems that hmmer3 wants the C->C and C->T to match the
-      // prealign N->N and N->B.  So we'll go with it.
       hmm->t[ pos_i + 1 ][ p7H_IM ] =
          toDouble(
-           profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toBegin ]  +
            profile[ galosh::Transition::fromPostAlign ][ galosh::TransitionFromPostAlign::toTerminal ]
-         ) / 2.0;
+         );
       hmm->t[ pos_i + 1 ][ p7H_II ] =
          toDouble(
-           profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toPreAlign ] +
            profile[ galosh::Transition::fromPostAlign ][ galosh::TransitionFromPostAlign::toPostAlign ]
-         ) / 2.0;
+         );
 
       hmm->t[ pos_i + 1 ][ p7H_MM ] = //hmm->t[ pos_i + 1 ][ p7H_IM ];
         toDouble(
-          profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toBegin ]  +
           profile[ galosh::Transition::fromPostAlign ][ galosh::TransitionFromPostAlign::toTerminal ]
-        ) / 2.0;
+        );
       hmm->t[ pos_i + 1 ][ p7H_MI ] = //1.0 - hmm->t[ pos_i + 1 ][ p7H_MM ];
         toDouble(
-          profile[ galosh::Transition::fromPreAlign ][ galosh::TransitionFromPreAlign::toPreAlign ] +
           profile[ galosh::Transition::fromPostAlign ][ galosh::TransitionFromPostAlign::toPostAlign ]
-        ) / 2.0;
+        );
 
       // ALWAYS TRUE, so need not be set:
       //hmm->t[ pos_i + 1 ][ p7H_DM ] = 1;
       //hmm->t[ pos_i + 1 ][ p7H_MD ] = 0;
       //hmm->t[ pos_i + 1 ][ p7H_DD ] = 0;
-
-      //assert( hmm->t[ pos_i + 1 ][ p7H_MI ] == hmm->t[ 0 ][ p7H_MI ] );
 
     } else {  // if this is the last position (use post-align insertions) .. else ..
       hmm->t[ pos_i + 1 ][ p7H_MM ] =
@@ -552,6 +711,42 @@ profillic_build_model(P7_BUILDER *bld, ESL_MSA * msa, ProfileType const & profil
   return status;
 }
   
+/* build_model():
+ * Given <msa>, choose HMM architecture, collect counts;
+ * upon return, <*ret_hmm> is newly allocated and contains
+ * relative-weighted observed counts.
+ * Optionally, caller can request an array of inferred traces for
+ * the <msa> too.
+ */
+template <typename ProfileType>
+static int
+profillic_build_model(P7_BUILDER *bld, ESL_MSA *msa, ProfileType const * const profile_ptr, P7_HMM **ret_hmm, P7_TRACE ***opt_tr)
+{
+  int status;
+
+  if( profile_ptr != NULL ) {
+    status = profillic_p7_Profillicmodelmaker(bld, msa, *profile_ptr, ret_hmm);
+  } else
+  if      (bld->arch_strategy == p7_ARCH_FAST)
+    {
+      status = p7_Fastmodelmaker(msa, bld->symfrac, ret_hmm, opt_tr);
+      if      (status == eslENORESULT) ESL_XFAIL(status, bld->errbuf, "Alignment %s has no consensus columns w/ > %d%% residues - can't build a model.\n", msa->name != NULL ? msa->name : "", (int) (100 * bld->symfrac));
+      else if (status == eslEMEM)      ESL_XFAIL(status, bld->errbuf, "Memory allocation failure in model construction.\n");
+      else if (status != eslOK)        ESL_XFAIL(status, bld->errbuf, "internal error in model construction.\n");      
+    }
+  else if (bld->arch_strategy == p7_ARCH_HAND)
+    {
+      status = p7_Handmodelmaker(msa, ret_hmm, opt_tr);
+      if      (status == eslENORESULT) ESL_XFAIL(status, bld->errbuf, "Alignment %s has no annotated consensus columns - can't build a model.\n", msa->name != NULL ? msa->name : "");
+      else if (status == eslEFORMAT)   ESL_XFAIL(status, bld->errbuf, "Alignment %s has no reference annotation line\n", msa->name != NULL ? msa->name : "");            
+      else if (status == eslEMEM)      ESL_XFAIL(status, bld->errbuf, "Memory allocation failure in model construction.\n");
+      else if (status != eslOK)        ESL_XFAIL(status, bld->errbuf, "internal error in model construction.\n");
+    }
+  return eslOK;
+
+ ERROR:
+  return status;
+}
 
 
 /* Function: annotate_model()
@@ -634,7 +829,7 @@ effective_seqnumber(P7_BUILDER *bld, const ESL_MSA *msa, P7_HMM *hmm, const P7_B
 {
   int    status;
 
-  if      ((bld->effn_strategy == p7_EFFN_NONE) || ( (bld->effn_strategy == p7_EFFN_ENTROPY) && ( bld->prior == NULL ) ) )    hmm->eff_nseq = msa->nseq;
+  if      (bld->effn_strategy == p7_EFFN_NONE)    hmm->eff_nseq = msa->nseq;
   else if (bld->effn_strategy == p7_EFFN_SET)     hmm->eff_nseq = bld->eset;
   else if (bld->effn_strategy == p7_EFFN_CLUST)
     {
@@ -652,12 +847,21 @@ effective_seqnumber(P7_BUILDER *bld, const ESL_MSA *msa, P7_HMM *hmm, const P7_B
       double etarget; 
       double eff_nseq;
 
+      // TODO: REMOVE
+      cout << "SETTING EFFN_ENTROPY" << endl;
+      //cout << "hacking hmm->nseq = 1000" << endl;
+      //hmm->nseq = 1000;
+
       etarget = (bld->esigma - eslCONST_LOG2R * log( 2.0 / ((double) hmm->M * (double) (hmm->M+1)))) / (double) hmm->M; /* xref J5/36. */
+      // TODO: REMOVE
+      cout << "nominal etarget is " << etarget << "; bld->re_target is " << bld->re_target << endl;
       etarget = ESL_MAX(bld->re_target, etarget);
 
       status = p7_EntropyWeight(hmm, bg, bld->prior, etarget, &eff_nseq);
       if      (status == eslEMEM) ESL_XFAIL(status, bld->errbuf, "memory allocation failed");
       else if (status != eslOK)   ESL_XFAIL(status, bld->errbuf, "internal failure in entropy weighting algorithm");
+      // TODO: REMOVE
+      cout << "calculated eff_nseq is " << eff_nseq << endl;
       hmm->eff_nseq = eff_nseq;
     }
     
@@ -673,7 +877,7 @@ effective_seqnumber(P7_BUILDER *bld, const ESL_MSA *msa, P7_HMM *hmm, const P7_B
  * Converts counts to probability parameters.
  */
 static int
-profillic_parameterize(P7_BUILDER *bld, P7_HMM *hmm)
+profillic_parameterize(P7_BUILDER *bld, P7_HMM *hmm, int const use_priors)
 {
   int   k;
   double c[p7_MAXABET];
@@ -682,7 +886,9 @@ profillic_parameterize(P7_BUILDER *bld, P7_HMM *hmm)
 
   int status;
 
-  if( bld->prior == NULL ) { 
+  if( use_priors ) { 
+    status = p7_ParameterEstimation(hmm, bld->prior);
+  } else {
     // Normalize but don't apply priors..
 
     /* Match transitions 0,1..M: 0 is the B state
@@ -725,8 +931,6 @@ profillic_parameterize(P7_BUILDER *bld, P7_HMM *hmm)
       esl_vec_FNorm(hmm->ins[k], hmm->abc->K);
     }
     status = eslOK;
-  } else {
-    status = p7_ParameterEstimation(hmm, bld->prior);
   }
   if (status  != eslOK) ESL_XFAIL(status, bld->errbuf, "parameter estimation failed");
 

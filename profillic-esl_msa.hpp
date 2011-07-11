@@ -283,7 +283,7 @@ static int read_stockholm(ESL_MSAFILE *afp, ESL_MSA **ret_msa);
 static int read_selex    (ESL_MSAFILE *afp, ESL_MSA **ret_msa);
 static int read_afa      (ESL_MSAFILE *afp, ESL_MSA **ret_msa);
 template <typename ProfileType>
-static int profillic_read_profillic      (ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & profile);
+static int profillic_read_profile      (ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType * profile_ptr);
 
 /* Function:  esl_msa_Read()
  * Synopsis:  Read next MSA from a file.
@@ -309,7 +309,7 @@ static int profillic_read_profillic      (ESL_MSAFILE *afp, ESL_MSA **ret_msa, P
  */
 template <class ProfileType>
 int
-profillic_esl_msa_Read(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & profile)
+profillic_esl_msa_Read(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType * profile_ptr)
 {
   ESL_MSA *msa;
   int      status;
@@ -349,7 +349,7 @@ profillic_esl_msa_Read(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & profil
   case eslMSAFILE_PSIBLAST:  ESL_FAIL(eslEFORMAT, afp->errbuf, "PSIBLAST format input parser not implemented yet.");
   case eslMSAFILE_SELEX:     status = read_selex    (afp, &msa); break;
   case eslMSAFILE_AFA:       status = read_afa      (afp, &msa); break;
-  case eslMSAFILE_PROFILLIC:  status = profillic_read_profillic      (afp, &msa, profile); break;
+  case eslMSAFILE_PROFILLIC:  status = profillic_read_profile      (afp, &msa, profile_ptr); break;
   default:                   ESL_EXCEPTION(eslEINCONCEIVABLE, "no such format");
   }
 
@@ -1463,7 +1463,7 @@ read_afa(ESL_MSAFILE *afp, ESL_MSA **ret_msa)
  * 12.5. galosh profile format (from profilic)
  *****************************************************************/
 
-/* profillic_read_profillic()
+/* profillic_read_profile()
  * Paul T Edlefsen   paul@galosh.org   June 29, 2011.
  *
  * Purpose: Parse the Profile HMM from an open galosh profile format
@@ -1482,7 +1482,7 @@ read_afa(ESL_MSAFILE *afp, ESL_MSA **ret_msa)
  */
 template <typename ProfileType>
 static int
-profillic_read_profillic(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & profile)
+profillic_read_profile(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType * profile_ptr)
 {
   ESL_MSA   *msa = NULL;
   char *buf;
@@ -1500,6 +1500,7 @@ profillic_read_profillic(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & prof
 
   uint32_t pos_i;
 
+  if (profile_ptr == NULL)  { ESL_EXCEPTION(eslEINCONCEIVABLE, "profile_ptr is NULL in profillic_read_profile(..)!"); }
   if (feof(afp->f))  { status = eslEOF; goto ERROR; }
   afp->errbuf[0] = '\0';
 
@@ -1512,17 +1513,17 @@ profillic_read_profillic(ESL_MSAFILE *afp, ESL_MSA **ret_msa, ProfileType & prof
   fread( buf, len, 1, afp->f ); //read into buffer
 
   profile_string = buf;
-  profile.fromString( profile_string );
+  profile_ptr->fromString( profile_string );
   if (buf)      free(buf);
-  // TODO: WHY WON'T THIS WORK?
+  // TODO: WHY WON'T THIS WORK?  See HACKs in profillic-hmmbuild.cpp to work around it.
   fseek( afp->f, 0, SEEK_END ); // go to the end (to signal there's no more profiles in the file, the next time we come to this function)
 
   // Calculate the consensus sequence.
-  profile_length = profile.length();
+  profile_length = profile_ptr->length();
   consensus_sequence.reinitialize( profile_length );
   for( pos_i = 0; pos_i < profile_length; pos_i++ ) {
     consensus_sequence[ pos_i ] =
-      profile[ pos_i ][ galosh::Emission::Match ].maximumValueType();
+      ( *profile_ptr )[ pos_i ][ galosh::Emission::Match ].maximumValueType();
   }
   tmp_consensus_output_stream << consensus_sequence;
 
