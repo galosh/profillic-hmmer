@@ -39,7 +39,7 @@ BOOST_LIBS	= -lboost_serialization -lboost_graph -lboost_filesystem -lboost_syst
 
 #========================================
 ### Paul added these for HMMER 3.0 (and easel) support (required):
-HMMER3_CFLAGS 	= -I./hmmer-3.0/src -I./hmmer-3.0/easel
+HMMER3_CFLAGS 	= -I. -I./hmmer-3.0/src -I./hmmer-3.0/easel
 HMMER3_LDFLAGS 	= -L./hmmer-3.0/src -L./hmmer-3.0/easel -L./hmmer-3.0/src/impl
 HMMER3_LIBS	= -leasel -lhmmer -lhmmerimpl
 #HMMER3_CFLAGS 	=
