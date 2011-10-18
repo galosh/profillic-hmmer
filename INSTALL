@@ -41,15 +41,19 @@ Installing BOOST (if you don't already have it!  Check first eg "locate boost")
 
 On my system, the boost libraries are in /usr/local/lib, and boost includes are in /usr/local/include.  I got them there like so:
 # Retrieve boost from http://sourceforge.net/projects/boost/files/boost/1.47.0/
-# Unpack it.  From one dir above it:
+# Unpack it.  Starting from one dir above it:
+
 cd boost_1_47_0
-./bootstrap.sh 
-sudo ./bjam install
+./bootstrap.sh
+./b2                !compile libraries
+sudo ./b2 install
 cd ..
 
-# If you don't have write access to /usr/local/bin and /usr/local/include, you should be able to install BOOST in your home directory instead (see the Boost Getting Started docs at eg http://www.boost.org/doc/libs/1_46_1/more/getting_started/ .  Below where it says to link to /usr/local/lib and /usr/local/include, instead link to your local install dirs.
 
-### NOTE: If you encounter problems later with bjam or with BOOST, it may be because there are multiple BOOST installs on your system.  You may need to first remove the /usr/local/lib/libboost* and /usr/local/include/boost files/dirs, then do the "sudo bjam install" again.  If that fails, consider a local install of BOOST as described above.
+# Note:  if you choose to use Boost v. 1.46.1 for some reason (e.g. you already have it installed) change "b2" to "bjam".
+# If you don't have write access to /usr/local/bin and /usr/local/include, you should be able to install BOOST in your home directory instead (see the Boost Getting Started docs at eg http://www.boost.org/doc/libs/1_47_0/more/getting_started/ .  Below where it says to link to /usr/local/lib and /usr/local/include, instead link to your local install dirs.
+
+### NOTE: If you encounter problems later with b2 (aka bjam in version Boost v. 1.46 and below) or with BOOST, it may be because there are multiple BOOST installs on your system.  You may need to first remove the /usr/local/lib/libboost* and /usr/local/include/boost files/dirs, then do the "sudo bjam install" again.  If that fails, consider a local install of BOOST as described above.
 
 # Now go into the profillic-hmmer directory.
 cd profillic-hmmer
