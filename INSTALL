@@ -3,16 +3,14 @@ and are easy to install.
 
 Required external libraries:
 ---
-HMMER v3.0 source code (exactly v3.0; later versions will probably not work):
-ftp://selab.janelia.org/pub/software/hmmer3/3.0/hmmer-3.0.tar.gz
+HMMER v3 latest source code:
+svn checkout https://svn.janelia.org/eddylab/eddys/src/hmmer/trunk hmmer
 
-BOOST (tested with version 1.47.0 and 1.46.0):
-http://sourceforge.net/projects/boost/files/boost/1.47.0/
+BOOST (tested with version 1.46.1):
+http://sourceforge.net/projects/boost/files/boost/1.46.1/
 
-Seqan version 1.2 (Note that the most recent version is 1.3 but we
-have not yet updated our code to be compatible with the new version,
-so you'll have to get version 1.2):
-http://www.seqan.de/uploads/media/Seqan_Release_1.2.zip
+Seqan snapshot
+svn co http://svn.seqan.de/seqan/trunk seqan-trunk
 
 HMMoC-BFloat-Algebra:
 http://pedlefsen.github.com/HMMoC-BFloat-Algebra/
@@ -21,39 +19,41 @@ Required galosh libraries:
 ---
 prolific (NOT the same thing as this library, which is "profillic-hmmer"):  http://galosh.github.com/prolific
 
-FIRST, retrieve and unpack this library (if you have not already done so), and rename the dir to "profillic-hmmer".  We will assume in the below instructions that all other required libraries will be installed in the parent directory of profillic-hmmer, though you may adjust them to suit you if that is not the case.
+FIRST, retrieve and unpack _this_ library (if you have not already done so), and rename the dir to "profillic-hmmer".  We will assume in the below instructions that all other required libraries will be installed in the parent directory of profillic-hmmer, though you may adjust them to suit you if that is not the case.
 
 =========
-(re)Installing HMMER v3.0 (*even if you already have it*)!
-profillic-hmmer relies on the header libraries of HMMER3 as well as its compiled API libraries.  If you already installed it, you may have access to the directory from which you installed it, or you may not.  If not, then you'll need to download and compile it again.  Either way, you need a link from the profillic-hmmer dir to the hmmer-3.0 source dir.
+Installing latest HMMER v3 (*even if you already have it*)!
+profillic-hmmer relies on the header libraries of HMMER3 as well as its compiled API libraries.  If you already installed it, you may have access to the directory from which you installed it, or you may not.  If not, then you'll need to download and compile it again.  Either way, you need a link from the profillic-hmmer dir to the hmmer source dir.
 
-Retrieve the source from ftp://selab.janelia.org/pub/software/hmmer3/3.0/hmmer-3.0.tar.gz
-# Unpack it. Follow the instructions in the included INSTALL file -- everything except `make install` (though you can do that too if you want).
-# Don't delete the hmmer-3.0 dir!  Move it somewhere nice, like just above the profillic-hmmer dir.
+Retrieve the source
+svn checkout https://svn.janelia.org/eddylab/eddys/src/hmmer/trunk hmmer
+# Follow the instructions in the included INSTALL file -- everything except `make install` (though you can do that too if you want).
+# Here's what I did:
+cd hmmer
+autoconf
+./configure
+make;make check
+# Don't delete the hmmer dir!  Move it somewhere nice, like just above the profillic-hmmer dir.
 # Now here's the key: tell profillic-hmmer where to find that source dir:
 cd profillic-hmmer
 # Create a symbolic link.  Of course you could have just moved the dir here instead.
-ln -s ../hmmer-3.0
+ln -s ../hmmer
 cd ..
 
 =========
 Installing BOOST (if you don't already have it!  Check first eg "locate boost")
 
 On my system, the boost libraries are in /usr/local/lib, and boost includes are in /usr/local/include.  I got them there like so:
-# Retrieve boost from http://sourceforge.net/projects/boost/files/boost/1.47.0/
-# Unpack it.  Starting from one dir above it:
-
-cd boost_1_47_0
-./bootstrap.sh
-./b2                !compile libraries
-sudo ./b2 install
+# Retrieve boost from http://sourceforge.net/projects/boost/files/boost/1.46.1/
+# Unpack it.  From one dir above it:
+cd boost_1_46_1
+./bootstrap.sh 
+sudo bjam install
 cd ..
 
+# If you don't have write access to /usr/local/bin and /usr/local/include, you should be able to install BOOST in your home directory instead (see the Boost Getting Started docs at eg http://www.boost.org/doc/libs/1_46_1/more/getting_started/ .  Below where it says to link to /usr/local/lib and /usr/local/include, instead link to your local install dirs.
 
-# Note:  if you choose to use Boost v. 1.46.1 for some reason (e.g. you already have it installed) change "b2" to "bjam".
-# If you don't have write access to /usr/local/bin and /usr/local/include, you should be able to install BOOST in your home directory instead (see the Boost Getting Started docs at eg http://www.boost.org/doc/libs/1_47_0/more/getting_started/ .  Below where it says to link to /usr/local/lib and /usr/local/include, instead link to your local install dirs.
-
-### NOTE: If you encounter problems later with b2 (aka bjam in version Boost v. 1.46 and below) or with BOOST, it may be because there are multiple BOOST installs on your system.  You may need to first remove the /usr/local/lib/libboost* and /usr/local/include/boost files/dirs, then do the "sudo bjam install" again.  If that fails, consider a local install of BOOST as described above.
+### NOTE: If you encounter problems later with bjam or with BOOST, it may be because there are multiple BOOST installs on your system.  You may need to first remove the /usr/local/lib/libboost* and /usr/local/include/boost files/dirs, then do the "sudo bjam install" again.  If that fails, consider a local install of BOOST as described above.
 
 # Now go into the profillic-hmmer directory.
 cd profillic-hmmer
@@ -62,20 +62,13 @@ ln -s /usr/local/lib boost-lib
 cd ..
 
 =========
-Installing Seqan version 1.2 (Note that the most recent version is 1.3 but we
-have not yet updated our code to be compatible with the new version,
-so you'll have to get version 1.2).
-
-## Get Seqan if you don't already have it (eg from http://www.seqan.de/uploads/media/Seqan_Release_1.2.zip -- note that it explodes where you unzip it, so first create a dir for it eg `mkdir seqan_release_1.2; cd seqan_release_1.2; unzip ~/Downloads/Seqan_Release_1.2.zip`)
-
-# Go into seqan's demos dir
-cd seqan_release_1.2/demos
-make all
-cd ../..
+Installing Seqan
+## Get Seqan if you don't already have it
+svn co http://svn.seqan.de/seqan/trunk seqan-trunk
 
 # Make sure that seqan link in the profillic-hmmer dir points to the right seqan dir.
 cd profillic-hmmer
-ln -s ../seqan_release_1.2 seqan
+ln -s ../seqan-trunk
 
 =========
 Installing HMMoC-BFloat-Algebra.
@@ -107,4 +100,4 @@ make
 ======
 NOTE: There are many warnings due to compiling c code with a c++ compiler.  In the Makefile I set CFLAGS = -w to suppress warnings.
 
-NOTE: At present there is no MPI support.  If you get compiler or runtime errors referencing MPI, make sure that HAVE_MPI is not #defined.  Check, for instance, hmmer3/src/p7_config.h.
+NOTE: At present there is no MPI support.  If you get compiler or runtime errors referencing MPI, make sure that HAVE_MPI is not #defined.  Check, for instance, hmmer/src/p7_config.h.

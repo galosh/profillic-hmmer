@@ -1,7 +1,83 @@
-/* main() for profile HMM construction from a multiple sequence alignment
- * 
- * SRE, Wed Jan  3 11:03:47 2007 [Janelia] [The Chemical Brothers]
- * SVN $Id: hmmbuild.c 3241 2010-03-27 15:06:02Z eddys $
+/**
+ * \file profillic-hmmbuild.cpp
+ * \brief
+ * Profile HMM construction from a multiple sequence alignment or profillic profile
+ * \details
+<pre>
+# profillic-hmmbuild :: profile HMM construction from multiple sequence alignments and galosh profiles
+# profillic-hmmer 1.0a (July 2011); http://galosh.org/
+# Copyright (C) 2011 Paul T. Edlefsen, Fred Hutchinson Cancer Research Center.
+# HMMER 3.1dev (November 2011); http://hmmer.org/
+# Copyright (C) 2011 Howard Hughes Medical Institute.
+# Freely distributed under the GNU General Public License (GPLv3).
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Usage: profillic-hmmbuild [-options] <hmmfile_out> <msafile>
+
+Basic options:
+  -h     : show brief help on version and usage
+  -n <s> : name the HMM <s>
+  -o <f> : direct summary output to file <f>, not stdout
+  -O <f> : resave annotated, possibly modified MSA to file <f>
+
+Options for selecting alphabet rather than guessing it:
+  --amino : input alignment is protein sequence data
+  --dna   : input alignment is DNA sequence data
+  --rna   : input alignment is RNA sequence data
+
+Alternative model construction strategies:
+  --fast            : assign cols w/ >= symfrac residues as consensus  [default]
+  --hand            : manual construction (requires reference annotation)
+  --profillic-amino : input msa is actually an AA galosh profile (from profillic)
+  --profillic-dna   : input msa is actually a DNA galosh profile (from profillic)
+  --symfrac <x>     : sets sym fraction controlling --fast construction  [0.5]
+  --fragthresh <x>  : if L <= x*alen, tag sequence as a fragment  [0.5]
+
+Alternative relative sequence weighting strategies:
+  --wpb     : Henikoff position-based weights  [default]
+  --wgsc    : Gerstein/Sonnhammer/Chothia tree weights
+  --wblosum : Henikoff simple filter weights
+  --wnone   : don't do any relative weighting; set all to 1
+  --wgiven  : use weights as given in MSA file
+  --wid <x> : for --wblosum: set identity cutoff  [0.62]  (0<=x<=1)
+
+Alternative effective sequence weighting strategies:
+  --eent       : adjust eff seq # to achieve relative entropy target  [default]
+  --eclust     : eff seq # is # of single linkage clusters
+  --enone      : no effective seq # weighting: just use nseq
+  --eset <x>   : set eff seq # for all models to <x>
+  --ere <x>    : for --eent: set minimum rel entropy/position to <x>
+  --esigma <x> : for --eent: set sigma param to <x>  [45.0]
+  --eid <x>    : for --eclust: set fractional identity cutoff to <x>  [0.62]
+
+Alternative prior strategies:
+  --pnone    : don't use any prior; parameters are frequencies
+  --plaplace : use a Laplace +1 prior
+
+Handling single sequence inputs:
+  --single      : use substitution score matrix for single-sequence protein inputs
+  --popen <x>   : gap open probability (with --single)
+  --pextend <x> : gap extend probability (with --single)
+  --mx <s>      : substitution score matrix (built-in matrices, with --single)
+  --mxfile <f>  : read substitution score matrix from file <f> (with --single)
+
+Control of E-value calibration:
+  --EmL <n> : length of sequences for MSV Gumbel mu fit  [200]  (n>0)
+  --EmN <n> : number of sequences for MSV Gumbel mu fit  [200]  (n>0)
+  --EvL <n> : length of sequences for Viterbi Gumbel mu fit  [200]  (n>0)
+  --EvN <n> : number of sequences for Viterbi Gumbel mu fit  [200]  (n>0)
+  --EfL <n> : length of sequences for Forward exp tail tau fit  [100]  (n>0)
+  --EfN <n> : number of sequences for Forward exp tail tau fit  [200]  (n>0)
+  --Eft <x> : tail mass for Forward exponential tail tau fit  [0.04]  (0<x<1)
+
+Other options:
+  --cpu <n>      : number of parallel CPU workers for multithreads
+  --stall        : arrest after start: for attaching debugger to process
+  --informat <s> : assert input alifile is in format <s> (no autodetect)
+  --seed <n>     : set RNG seed to <n> (if 0: one-time arbitrary seed)  [42]
+  --w_beta <x>   : tail mass at which window length is determined
+  --w_length <n> : window length 
+  --noprior      : do not apply any priors
+ </pre>
  */
 extern "C" {
 #include "p7_config.h"
@@ -22,7 +98,11 @@ extern "C" {
 #include "esl_alphabet.h"
 #include "esl_getopts.h"
 #include "esl_mpi.h"
-// #include "esl_msa.h" // See below.  We now use profillic-esl_msa.hpp
+  /// \note TAH 8/12 Workaround for C++ keyword "new" in esl_msa.h
+#define new _new
+#include "esl_msa.h"
+#undef new
+#include "esl_msafile.h"
 #include "esl_msaweight.h"
 #include "esl_msacluster.h"
 #include "esl_stopwatch.h"
@@ -41,12 +121,13 @@ extern "C" {
 #include "hmmer.h"
 }
 
-/////////////// For profillic-hmmer //////////////////////////////////
+/* /////////////// For profillic-hmmer ////////////////////////////////// */
 #include "profillic-hmmer.hpp"
 #include "profillic-p7_builder.hpp"
-#include "profillic-esl_msa.hpp"
+//#include "profillic-esl_msa.hpp"
+#include "profillic-esl_msafile.hpp"
 
-/// Updated notices:
+// Updated notices:
 #define PROFILLIC_HMMER_VERSION "1.0a"
 #define PROFILLIC_HMMER_DATE "July 2011"
 #define PROFILLIC_HMMER_COPYRIGHT "Copyright (C) 2011 Paul T. Edlefsen, Fred Hutchinson Cancer Research Center."
@@ -59,7 +140,9 @@ extern "C" {
  * 1. Miscellaneous functions for H3
  *****************************************************************/
 
-/* Function:  p7_banner()
+/** 
+ * <pre>
+ * Function:  p7_banner()
  * Synopsis:  print standard HMMER application output header
  * Incept:    SRE, Wed May 23 10:45:53 2007 [Janelia]
  *
@@ -97,6 +180,7 @@ extern "C" {
  *    HMMER_LICENSE   "Freely licensed under the Janelia Software License."
  *
  * Returns:   (void)
+ * </pre>
  */
 void
 profillic_p7_banner(FILE *fp, char *progname, char *banner)
@@ -116,7 +200,7 @@ profillic_p7_banner(FILE *fp, char *progname, char *banner)
   if (appname != NULL) free(appname);
   return;
 }
-/////////////// End profillic-hmmer //////////////////////////////////
+/* /////////////// End profillic-hmmer ////////////////////////////////// */
 
 typedef struct {
 #ifdef HMMER_THREADS
@@ -135,6 +219,7 @@ typedef struct {
   ESL_MSA    *msa;
   P7_HMM     *hmm;
   double      entropy;
+  int         force_single; /* FALSE by default,  TRUE if esl_opt_IsUsed(go, "--single") ;  only matters for single sequences */
 } WORK_ITEM;
 
 typedef struct _pending_s {
@@ -152,14 +237,6 @@ typedef struct _pending_s {
 #define EFFOPTS "--eent,--eclust,--eset,--enone"               /* Exclusive options for effective sequence number calculation */
 #define WGTOPTS "--wgsc,--wblosum,--wpb,--wnone,--wgiven"      /* Exclusive options for relative weighting                    */
 
-#if defined (HMMER_THREADS) && defined (HAVE_MPI)
-#define CPUOPTS     "--mpi,-n"
-#define MPIOPTS     "--cpu,-n"
-#else
-#define CPUOPTS     "-n"
-#define MPIOPTS     "-n"
-#endif
-
 static ESL_OPTIONS options[] = {
   /* name           type      default  env  range     toggles      reqs   incomp  help   docgroup*/
   { "-h",        eslARG_NONE,   FALSE, NULL, NULL,      NULL,      NULL,    NULL, "show brief help on version and usage",                  1 },
@@ -176,7 +253,7 @@ static ESL_OPTIONS options[] = {
   { "--profillic-amino",    eslARG_NONE, FALSE,NULL, NULL,    CONOPTS,    NULL,     NULL, "input msa is actually an AA galosh profile (from profillic)",       3 },
   { "--profillic-dna",    eslARG_NONE, FALSE,NULL, NULL,    CONOPTS,    NULL,     NULL, "input msa is actually a DNA galosh profile (from profillic)",       3 },
   { "--symfrac", eslARG_REAL,   "0.5", NULL, "0<=x<=1", NULL,   "--fast",   NULL, "sets sym fraction controlling --fast construction",     3 },
-  { "--fragthresh",eslARG_REAL, "0.5", NULL, "0<=x<=1", NULL,     NULL,     NULL, "if L < x<L>, tag sequence as a fragment",               3 },
+  { "--fragthresh",eslARG_REAL, "0.5", NULL, "0<=x<=1", NULL,     NULL,     NULL, "if L <= x*alen, tag sequence as a fragment",            3 },
 /* Alternate relative sequence weighting strategies */
   /* --wme not implemented in HMMER3 yet */
   { "--wpb",     eslARG_NONE,"default",NULL, NULL,    WGTOPTS,    NULL,      NULL, "Henikoff position-based weights",                      4 },
@@ -185,7 +262,7 @@ static ESL_OPTIONS options[] = {
   { "--wnone",   eslARG_NONE,   NULL,  NULL, NULL,    WGTOPTS,    NULL,      NULL, "don't do any relative weighting; set all to 1",        4 },
   { "--wgiven",  eslARG_NONE,   NULL,  NULL, NULL,    WGTOPTS,    NULL,      NULL, "use weights as given in MSA file",                     4 },
   { "--wid",     eslARG_REAL, "0.62",  NULL,"0<=x<=1",   NULL,"--wblosum",   NULL, "for --wblosum: set identity cutoff",                   4 },
-/* Alternate effective sequence weighting strategies */
+/* Alternative effective sequence weighting strategies */
   { "--eent",    eslARG_NONE,"default",NULL, NULL,    EFFOPTS,    NULL,      NULL, "adjust eff seq # to achieve relative entropy target",  5 },
   { "--eclust",  eslARG_NONE,  FALSE,  NULL, NULL,    EFFOPTS,    NULL,      NULL, "eff seq # is # of single linkage clusters",            5 },
   { "--enone",   eslARG_NONE,  FALSE,  NULL, NULL,    EFFOPTS,    NULL,      NULL, "no effective seq # weighting: just use nseq",          5 },
@@ -193,7 +270,17 @@ static ESL_OPTIONS options[] = {
   { "--ere",     eslARG_REAL,   NULL,  NULL,"x>0",       NULL, "--eent",     NULL, "for --eent: set minimum rel entropy/position to <x>",  5 },
   { "--esigma",  eslARG_REAL, "45.0",  NULL,"x>0",       NULL, "--eent",     NULL, "for --eent: set sigma param to <x>",                   5 },
   { "--eid",     eslARG_REAL, "0.62",  NULL,"0<=x<=1",   NULL,"--eclust",    NULL, "for --eclust: set fractional identity cutoff to <x>",  5 },
-/* Control of E-value calibration */
+/* Alternative prior strategies */
+  { "--pnone",   eslARG_NONE,  FALSE,  NULL, NULL,       NULL,  NULL,"--plaplace", "don't use any prior; parameters are frequencies",      9 },
+  { "--plaplace",eslARG_NONE,  FALSE,  NULL, NULL,       NULL,  NULL,   "--pnone", "use a Laplace +1 prior",                               9 },
+/* Single sequence methods */
+  { "--single",  eslARG_NONE,   FALSE, NULL,   NULL,   NULL,  NULL,            "",   "use substitution score matrix for single-sequence protein inputs",     10 },
+  { "--popen",    eslARG_REAL,   "0.02", NULL,"0<=x<0.5",NULL, NULL,           "",   "gap open probability (with --single)",                         10 },
+  { "--pextend",  eslARG_REAL,    "0.4", NULL, "0<=x<1", NULL, NULL,           "",   "gap extend probability (with --single)",                       10 },
+  { "--mx",     eslARG_STRING, "BLOSUM62", NULL, NULL,   NULL, NULL,   "--mxfile",   "substitution score matrix (built-in matrices, with --single)", 10 },
+  { "--mxfile", eslARG_INFILE,     NULL, NULL,   NULL,   NULL, NULL,       "--mx",   "read substitution score matrix from file <f> (with --single)", 10 },
+
+  /* Control of E-value calibration */
   { "--EmL",     eslARG_INT,    "200", NULL,"n>0",       NULL,    NULL,      NULL, "length of sequences for MSV Gumbel mu fit",            6 },   
   { "--EmN",     eslARG_INT,    "200", NULL,"n>0",       NULL,    NULL,      NULL, "number of sequences for MSV Gumbel mu fit",            6 },   
   { "--EvL",     eslARG_INT,    "200", NULL,"n>0",       NULL,    NULL,      NULL, "length of sequences for Viterbi Gumbel mu fit",        6 },   
@@ -201,23 +288,27 @@ static ESL_OPTIONS options[] = {
   { "--EfL",     eslARG_INT,    "100", NULL,"n>0",       NULL,    NULL,      NULL, "length of sequences for Forward exp tail tau fit",     6 },   
   { "--EfN",     eslARG_INT,    "200", NULL,"n>0",       NULL,    NULL,      NULL, "number of sequences for Forward exp tail tau fit",     6 },   
   { "--Eft",     eslARG_REAL,  "0.04", NULL,"0<x<1",     NULL,    NULL,      NULL, "tail mass for Forward exponential tail tau fit",       6 },   
+
 /* Other options */
 #ifdef HMMER_THREADS 
-  { "--cpu",     eslARG_INT,    NULL,"HMMER_NCPU","n>=0",NULL,     NULL, CPUOPTS, "number of parallel CPU workers for multithreads",       8 },
+  { "--cpu",     eslARG_INT,    NULL,"HMMER_NCPU","n>=0",NULL,     NULL,  NULL,  "number of parallel CPU workers for multithreads",       8 },
 #endif
 #ifdef HAVE_MPI
-  { "--mpi",     eslARG_NONE,   FALSE, NULL, NULL,      NULL,      NULL, MPIOPTS, "run as an MPI parallel program",                        8 },
+  { "--mpi",     eslARG_NONE,   FALSE, NULL, NULL,      NULL,      NULL,  NULL,  "run as an MPI parallel program",                        8 },
 #endif
-  { "--stall",   eslARG_NONE,   FALSE, NULL, NULL,      NULL,   "--mpi",    NULL, "arrest after start: for debugging MPI under gdb",       8 },  
-  { "--informat", eslARG_STRING, NULL, NULL, NULL,      NULL,      NULL,    NULL, "assert input alifile is in format <s> (no autodetect)", 8 },
-  { "--seed",     eslARG_INT,   "42", NULL, "n>=0",     NULL,      NULL,    NULL, "set RNG seed to <n> (if 0: one-time arbitrary seed)",   8 },
-  { "--laplace", eslARG_NONE,  FALSE, NULL, NULL,       NULL,      NULL,    NULL, "use a Laplace +1 prior",                                8 },
+  { "--stall",   eslARG_NONE,       FALSE, NULL, NULL,    NULL,     NULL,    NULL, "arrest after start: for attaching debugger to process", 8 },
+  { "--informat", eslARG_STRING,     NULL, NULL, NULL,    NULL,     NULL,    NULL, "assert input alifile is in format <s> (no autodetect)", 8 },
+  { "--seed",     eslARG_INT,        "42", NULL, "n>=0",  NULL,     NULL,    NULL, "set RNG seed to <n> (if 0: one-time arbitrary seed)",   8 },
+  { "--w_beta",   eslARG_REAL,       NULL, NULL, NULL,    NULL,     NULL,    NULL, "tail mass at which window length is determined",        8 },
+  { "--w_length", eslARG_INT,        NULL, NULL, NULL,    NULL,     NULL,    NULL, "window length ",                                        8 },
+  { "--maxinsertlen",  eslARG_INT,   NULL, NULL, "n>=5",  NULL,     NULL,    NULL, "pretend all inserts are length <= <n>",   8 },
   { "--noprior", eslARG_NONE,  FALSE, NULL, NULL,       NULL,      NULL,    NULL, "do not apply any priors",                                8 },
   {  0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
 
-/* struct cfg_s : "Global" application configuration shared by all threads/processes
+/** 
+ * struct cfg_s : "Global" application configuration shared by all threads/processes
  * 
  * This structure is passed to routines within main.c, as a means of semi-encapsulation
  * of shared data amongst different parallel processes (threads or MPI processes).
@@ -227,7 +318,7 @@ struct cfg_s {
 
   char         *alifile;	/* name of the alignment file we're building HMMs from  */
   int           fmt;		/* format code for alifile */
-  ESL_MSAFILE  *afp;            /* open alifile  */
+  ESLX_MSAFILE *afp;            /* open alifile  */
   ESL_ALPHABET *abc;		/* digital alphabet */
 
   char         *hmmName;        /* hmm file name supplied from -n          */
@@ -249,22 +340,22 @@ struct cfg_s {
 };
 
 
-static char usage[]  = "[-options] <hmmfile output> <alignment file input>";
+static char usage[]  = "[-options] <hmmfile_out> <msafile>";
 static char banner[] = "profile HMM construction from multiple sequence alignments and galosh profiles";
 
-static int  init_master_cfg(const ESL_GETOPTS *go, struct cfg_s *cfg, char *errmsg);
-
-static int  serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg);
+static int  profillic_usual_master(const ESL_GETOPTS *go, struct cfg_s *cfg);
 template <class ProfileType>
-static int  serial_loop  (WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr);
+static void  profillic_serial_loop  (WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr, const ESL_GETOPTS *go);
 #ifdef HMMER_THREADS
-static int  thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg);
+static void thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg, const ESL_GETOPTS *go);
 static void pipeline_thread(void *arg);
 #endif /*HMMER_THREADS*/
 
 #ifdef HAVE_MPI
 static void  mpi_master    (const ESL_GETOPTS *go, struct cfg_s *cfg);
 static void  mpi_worker    (const ESL_GETOPTS *go, struct cfg_s *cfg);
+static void  mpi_init_open_failure(ESLX_MSAFILE *afp, int status);
+static void  mpi_init_other_failure(char *format, ...);
 #endif
 
 static int profillic_output_header(const ESL_GETOPTS *go, const struct cfg_s *cfg);
@@ -272,111 +363,162 @@ static int output_result(const struct cfg_s *cfg, char *errbuf, int msaidx, ESL_
 static int set_msa_name (      struct cfg_s *cfg, char *errbuf, ESL_MSA *msa);
 
 
-static void
+static int
 process_commandline(int argc, char **argv, ESL_GETOPTS **ret_go, char **ret_hmmfile, char **ret_alifile)
 {
-  ESL_GETOPTS *go = NULL;
+  ESL_GETOPTS *go = esl_getopts_Create(options);
+  int          status;
 
-  if ((go = esl_getopts_Create(options))     == NULL)    p7_Die("problem with options structure");
-  if (esl_opt_ProcessEnvironment(go)         != eslOK) { printf("Failed to process environment: %s\n", go->errbuf); goto ERROR; }
-  if (esl_opt_ProcessCmdline(go, argc, argv) != eslOK) { printf("Failed to parse command line: %s\n",  go->errbuf); goto ERROR; }
-  if (esl_opt_VerifyConfig(go)               != eslOK) { printf("Failed to parse command line: %s\n",  go->errbuf); goto ERROR; }
+  if (esl_opt_ProcessEnvironment(go)         != eslOK) { if (printf("Failed to process environment:\n%s\n", go->errbuf) < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+  if (esl_opt_ProcessCmdline(go, argc, argv) != eslOK) { if (printf("Failed to parse command line:\n%s\n",  go->errbuf) < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+  if (esl_opt_VerifyConfig(go)               != eslOK) { if (printf("Failed to parse command line:\n%s\n",  go->errbuf) < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
 
   /* help format: */
   if (esl_opt_GetBoolean(go, "-h") == TRUE) 
     {
       profillic_p7_banner(stdout, argv[0], banner);
       esl_usage(stdout, argv[0], usage);
-      puts("\nwhere basic options are:");
+
+      if (puts("\nBasic options:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 1, 2, 80);
-      puts("\nOptions for selecting alphabet rather than guessing it:");
+
+      if (puts("\nOptions for selecting alphabet rather than guessing it:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 2, 2, 80);
-      puts("\nAlternative model construction strategies:");
+
+      if (puts("\nAlternative model construction strategies:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 3, 2, 80);
-      puts("\nAlternative relative sequence weighting strategies:");
+
+      if (puts("\nAlternative relative sequence weighting strategies:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 4, 2, 80);
-      puts("\nAlternate effective sequence weighting strategies:");
+
+      if (puts("\nAlternative effective sequence weighting strategies:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 5, 2, 80);
-      puts("\nControl of E-value calibration:");
+
+      if (puts("\nAlternative prior strategies:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
+      esl_opt_DisplayHelp(stdout, go, 9, 2, 80);
+
+      if (puts("\nHandling single sequence inputs:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
+      esl_opt_DisplayHelp(stdout, go, 10, 2, 80);
+
+
+      if (puts("\nControl of E-value calibration:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 6, 2, 80);
-      puts("\nOther options:");
+
+      if (puts("\nOther options:") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
       esl_opt_DisplayHelp(stdout, go, 8, 2, 80);
       exit(0);
     }
 
-  if (esl_opt_ArgNumber(go)                  != 2)    { puts("Incorrect number of command line arguments.");      goto ERROR; }
-  if ((*ret_hmmfile = esl_opt_GetArg(go, 1)) == NULL) { puts("Failed to get <hmmfile> argument on command line"); goto ERROR; }
-  if ((*ret_alifile = esl_opt_GetArg(go, 2)) == NULL) { puts("Failed to get <alifile> argument on command line"); goto ERROR; }
+  if (esl_opt_ArgNumber(go)                  != 2)    { if (puts("Incorrect number of command line arguments.")          < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+  if ((*ret_hmmfile = esl_opt_GetArg(go, 1)) == NULL) { if (puts("Failed to get <hmmfile_out> argument on command line") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+  if ((*ret_alifile = esl_opt_GetArg(go, 2)) == NULL) { if (puts("Failed to get <msafile> argument on command line")     < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+
+  if (strcmp(*ret_hmmfile, "-") == 0) 
+    { if (puts("Can't write <hmmfile_out> to stdout: don't use '-'")         < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+  if (strcmp(*ret_alifile, "-") == 0 && ! esl_opt_IsOn(go, "--informat"))
+    { if (puts("Must specify --informat to read <alifile> from stdin ('-')") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed"); goto FAILURE; }
+
+#ifdef HAVE_MPI
+  if (esl_opt_IsOn(go, "--mpi") && esl_opt_IsOn(go, "--cpu")) 
+    {
+      int mpisetby = esl_opt_GetSetter(go, "--mpi");
+      int cpusetby = esl_opt_GetSetter(go, "--cpu");
+
+      if (mpisetby == cpusetby) {
+	if (puts("Options --cpu and --mpi are incompatible. The MPI implementation is not multithreaded.") < 0) ESL_XEXCEPTION_SYS(eslEWRITE, "write failed");
+	goto FAILURE;
+      }
+    }
+#endif
+
   *ret_go = go;
-  return;
+  return eslOK;
   
- ERROR:  /* all errors handled here are user errors, so be polite.  */
+ FAILURE:  /* all errors handled here are user errors, so be polite.  */
   esl_usage(stdout, argv[0], usage);
   puts("\nwhere basic options are:");
   esl_opt_DisplayHelp(stdout, go, 1, 2, 80);
-  printf("\nTo see more help on other available options, do %s -h\n\n", argv[0]);
+  printf("\nTo see more help on other available options, do:\n  %s -h\n\n", argv[0]);
+  esl_getopts_Destroy(go);
   exit(1);  
+
+ ERROR:
+  if (go) esl_getopts_Destroy(go);
+  exit(status);
 }
 
+/**
+ * profillic_output_header
+ *
+ * display input data summary and program parameters
+ */
 static int
 profillic_output_header(const ESL_GETOPTS *go, const struct cfg_s *cfg)
 {
   if (cfg->my_rank > 0)  return eslOK;
-  /*  if (! cfg->be_verbose) return eslOK; */
+
   profillic_p7_banner(cfg->ofp, go->argv[0], banner);
 
   if( esl_opt_IsUsed(go, "--profillic-amino") || esl_opt_IsUsed(go, "--profillic-dna") ) {
-    fprintf(cfg->ofp, "# input galosh profile file:        %s\n", cfg->alifile);
+    if (fprintf(cfg->ofp, "# input galosh profile file:        %s\n", cfg->alifile) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   } else {
-    fprintf(cfg->ofp, "# input alignment file:             %s\n", cfg->alifile);
+    if (fprintf(cfg->ofp, "# input alignment file:             %s\n", cfg->alifile) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   }
-  fprintf(cfg->ofp, "# output HMM file:                  %s\n", cfg->hmmfile);
+  if (fprintf(cfg->ofp, "# output HMM file:                  %s\n", cfg->hmmfile) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 
-  if (esl_opt_IsUsed(go, "-n"))          fprintf(cfg->ofp, "# name (the single) HMM:            %s\n",   esl_opt_GetString(go, "-n"));
-  if (esl_opt_IsUsed(go, "-o"))          fprintf(cfg->ofp, "# output directed to file:          %s\n",   esl_opt_GetString(go, "-o"));
-  if (esl_opt_IsUsed(go, "-O"))          fprintf(cfg->ofp, "# processed alignment resaved to:   %s\n",   esl_opt_GetString(go, "-O"));
-  if (esl_opt_IsUsed(go, "--amino"))     fprintf(cfg->ofp, "# input alignment is asserted as:   protein\n");
-  if (esl_opt_IsUsed(go, "--dna"))       fprintf(cfg->ofp, "# input alignment is asserted as:   DNA\n");
-  if (esl_opt_IsUsed(go, "--rna"))       fprintf(cfg->ofp, "# input alignment is asserted as:   RNA\n");
-  if (esl_opt_IsUsed(go, "--fast"))      fprintf(cfg->ofp, "# model architecture construction:  fast/heuristic\n");
-  if (esl_opt_IsUsed(go, "--hand"))      fprintf(cfg->ofp, "# model architecture construction:  hand-specified by RF annotation\n");
-  if (esl_opt_IsUsed(go, "--profillic-amino"))   fprintf(cfg->ofp, "# model architecture construction:  use input amino profile\n");
-  if (esl_opt_IsUsed(go, "--profillic-dna"))   fprintf(cfg->ofp, "# model architecture construction:  use input dna profile\n");
-  if (esl_opt_IsUsed(go, "--symfrac"))   fprintf(cfg->ofp, "# sym fraction for model structure: %.3f\n", esl_opt_GetReal(go, "--symfrac"));
-  if (esl_opt_IsUsed(go, "--fragthresh"))fprintf(cfg->ofp, "# seq called fragment if < xL    :  %.3f\n", esl_opt_GetReal(go, "--fragthresh"));
-  if (esl_opt_IsUsed(go, "--wpb"))       fprintf(cfg->ofp, "# relative weighting scheme:        Henikoff PB\n");
-  if (esl_opt_IsUsed(go, "--wgsc"))      fprintf(cfg->ofp, "# relative weighting scheme:        G/S/C\n");
-  if (esl_opt_IsUsed(go, "--wblosum"))   fprintf(cfg->ofp, "# relative weighting scheme:        BLOSUM filter\n");
-  if (esl_opt_IsUsed(go, "--wnone"))     fprintf(cfg->ofp, "# relative weighting scheme:        none\n");
-  if (esl_opt_IsUsed(go, "--wid"))       fprintf(cfg->ofp, "# frac id cutoff for BLOSUM wgts:   %f\n",   esl_opt_GetReal(go, "--wid"));
-  if (esl_opt_IsUsed(go, "--eent"))      fprintf(cfg->ofp, "# effective seq number scheme:      entropy weighting\n");
-  if (esl_opt_IsUsed(go, "--eclust"))    fprintf(cfg->ofp, "# effective seq number scheme:      single linkage clusters\n");
-  if (esl_opt_IsUsed(go, "--enone"))     fprintf(cfg->ofp, "# effective seq number scheme:      none\n");
-  if (esl_opt_IsUsed(go, "--eset"))      fprintf(cfg->ofp, "# effective seq number:             set to %f\n", esl_opt_GetReal(go, "--eset"));
-  if (esl_opt_IsUsed(go, "--ere") )      fprintf(cfg->ofp, "# minimum rel entropy target:       %f bits\n",   esl_opt_GetReal(go, "--ere"));
-  if (esl_opt_IsUsed(go, "--esigma") )   fprintf(cfg->ofp, "# entropy target sigma parameter:   %f bits\n",   esl_opt_GetReal(go, "--esigma"));
-  if (esl_opt_IsUsed(go, "--eid") )      fprintf(cfg->ofp, "# frac id cutoff for --eclust:      %f\n",        esl_opt_GetReal(go, "--eid"));
-  if (esl_opt_IsUsed(go, "--EmL") )      fprintf(cfg->ofp, "# seq length for MSV Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EmL"));
-  if (esl_opt_IsUsed(go, "--EmN") )      fprintf(cfg->ofp, "# seq number for MSV Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EmN"));
-  if (esl_opt_IsUsed(go, "--EvL") )      fprintf(cfg->ofp, "# seq length for Vit Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EvL"));
-  if (esl_opt_IsUsed(go, "--EvN") )      fprintf(cfg->ofp, "# seq number for Vit Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EvN"));
-  if (esl_opt_IsUsed(go, "--EfL") )      fprintf(cfg->ofp, "# seq length for Fwd exp tau fit:   %d\n",        esl_opt_GetInteger(go, "--EfL"));
-  if (esl_opt_IsUsed(go, "--EfN") )      fprintf(cfg->ofp, "# seq number for Fwd exp tau fit:   %d\n",        esl_opt_GetInteger(go, "--EfN"));
-  if (esl_opt_IsUsed(go, "--Eft") )      fprintf(cfg->ofp, "# tail mass for Fwd exp tau fit:    %f\n",        esl_opt_GetReal(go, "--Eft"));
+  if (esl_opt_IsUsed(go, "-n")           && fprintf(cfg->ofp, "# name (the single) HMM:            %s\n",        esl_opt_GetString(go, "-n"))         < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "-o")           && fprintf(cfg->ofp, "# output directed to file:          %s\n",        esl_opt_GetString(go, "-o"))         < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "-O")           && fprintf(cfg->ofp, "# processed alignment resaved to:   %s\n",        esl_opt_GetString(go, "-O"))         < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--amino")      && fprintf(cfg->ofp, "# input alignment is asserted as:   protein\n")                                        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--dna")        && fprintf(cfg->ofp, "# input alignment is asserted as:   DNA\n")                                            < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--rna")        && fprintf(cfg->ofp, "# input alignment is asserted as:   RNA\n")                                            < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--fast")       && fprintf(cfg->ofp, "# model architecture construction:  fast/heuristic\n")                                 < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--hand")       && fprintf(cfg->ofp, "# model architecture construction:  hand-specified by RF annotation\n")                < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--profillic-amino")       && fprintf(cfg->ofp, "# model architecture construction:  use input amino profile\n")                < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--profillic-dna")       && fprintf(cfg->ofp, "# model architecture construction:  use input dna profile\n")                < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--symfrac")    && fprintf(cfg->ofp, "# sym fraction for model structure: %.3f\n",      esl_opt_GetReal(go, "--symfrac"))    < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--fragthresh") && fprintf(cfg->ofp, "# seq called frag if L <= x*alen:   %.3f\n",      esl_opt_GetReal(go, "--fragthresh")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--wpb")        && fprintf(cfg->ofp, "# relative weighting scheme:        Henikoff PB\n")                                    < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--wgsc")       && fprintf(cfg->ofp, "# relative weighting scheme:        G/S/C\n")                                          < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--wblosum")    && fprintf(cfg->ofp, "# relative weighting scheme:        BLOSUM filter\n")                                  < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--wnone")      && fprintf(cfg->ofp, "# relative weighting scheme:        none\n")                                           < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--wid")        && fprintf(cfg->ofp, "# frac id cutoff for BLOSUM wgts:   %f\n",        esl_opt_GetReal(go, "--wid"))        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--eent")       && fprintf(cfg->ofp, "# effective seq number scheme:      entropy weighting\n")                              < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--eclust")     && fprintf(cfg->ofp, "# effective seq number scheme:      single linkage clusters\n")                        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--enone")      && fprintf(cfg->ofp, "# effective seq number scheme:      none\n")                                           < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--eset")       && fprintf(cfg->ofp, "# effective seq number:             set to %f\n", esl_opt_GetReal(go, "--eset"))       < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--ere")        && fprintf(cfg->ofp, "# minimum rel entropy target:       %f bits\n",   esl_opt_GetReal(go, "--ere"))        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--esigma")     && fprintf(cfg->ofp, "# entropy target sigma parameter:   %f bits\n",   esl_opt_GetReal(go, "--esigma"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--eid")        && fprintf(cfg->ofp, "# frac id cutoff for --eclust:      %f\n",        esl_opt_GetReal(go, "--eid"))        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--pnone")      && fprintf(cfg->ofp, "# prior scheme:                     none\n")                                           < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--plaplace")   && fprintf(cfg->ofp, "# prior scheme:                     Laplace +1\n")                                     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EmL")        && fprintf(cfg->ofp, "# seq length for MSV Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EmL"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EmN")        && fprintf(cfg->ofp, "# seq number for MSV Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EmN"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EvL")        && fprintf(cfg->ofp, "# seq length for Vit Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EvL"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EvN")        && fprintf(cfg->ofp, "# seq number for Vit Gumbel mu fit: %d\n",        esl_opt_GetInteger(go, "--EvN"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EfL")        && fprintf(cfg->ofp, "# seq length for Fwd exp tau fit:   %d\n",        esl_opt_GetInteger(go, "--EfL"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--EfN")        && fprintf(cfg->ofp, "# seq number for Fwd exp tau fit:   %d\n",        esl_opt_GetInteger(go, "--EfN"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--Eft")        && fprintf(cfg->ofp, "# tail mass for Fwd exp tau fit:    %f\n",        esl_opt_GetReal(go, "--Eft"))        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--popen")      && fprintf(cfg->ofp, "# gap open probability:            %f\n",         esl_opt_GetReal   (go, "--popen"))   < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--pextend")    && fprintf(cfg->ofp, "# gap extend probability:          %f\n",         esl_opt_GetReal   (go, "--pextend")) < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--mx")         && fprintf(cfg->ofp, "# subst score matrix (built-in):   %s\n",         esl_opt_GetString (go, "--mx"))      < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--mxfile")     && fprintf(cfg->ofp, "# subst score matrix (file):       %s\n",         esl_opt_GetString (go, "--mxfile"))  < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--maxinsertlen")  && fprintf(cfg->ofp, "# max insert length:                %d\n",         esl_opt_GetInteger (go, "--maxinsertlen"))  < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+
 #ifdef HMMER_THREADS
-  if (esl_opt_IsUsed(go, "--cpu"))       fprintf(cfg->ofp, "# number of worker threads:         %d\n", esl_opt_GetInteger(go, "--cpu"));  
+  if (esl_opt_IsUsed(go, "--cpu")        && fprintf(cfg->ofp, "# number of worker threads:         %d\n",        esl_opt_GetInteger(go, "--cpu"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");  
 #endif
 #ifdef HAVE_MPI
-  if (esl_opt_IsUsed(go, "--mpi") )      fprintf(cfg->ofp, "# parallelization mode:             MPI\n");
+  if (esl_opt_IsUsed(go, "--mpi")        && fprintf(cfg->ofp, "# parallelization mode:             MPI\n")                                            < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 #endif
   if (esl_opt_IsUsed(go, "--seed"))  {
-    if (esl_opt_GetInteger(go, "--seed") == 0) fprintf(cfg->ofp,"# random number seed:               one-time arbitrary\n");
-    else                                       fprintf(cfg->ofp,"# random number seed set to:        %d\n", esl_opt_GetInteger(go, "--seed"));
+    if (esl_opt_GetInteger(go, "--seed") == 0  && fprintf(cfg->ofp,"# random number seed:               one-time arbitrary\n")                        < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+    else if                              (  fprintf(cfg->ofp,"# random number seed set to:        %d\n",         esl_opt_GetInteger(go, "--seed"))    < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   }
-  if (esl_opt_IsUsed(go, "--laplace") )  fprintf(cfg->ofp, "# prior:                            Laplace +1\n");
-  if (esl_opt_IsUsed(go, "--noprior") )  fprintf(cfg->ofp, "# prior:                            None\n");
-  fprintf(cfg->ofp, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n\n");
+  if (esl_opt_IsUsed(go, "--w_beta")     && fprintf(cfg->ofp, "# window length beta value:         %g bits\n",   esl_opt_GetReal(go, "--w_beta"))     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
+  if (esl_opt_IsUsed(go, "--w_length")   && fprintf(cfg->ofp, "# window length :                   %d\n",        esl_opt_GetInteger(go, "--w_length"))< 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
 
+  if (fprintf(cfg->ofp, "# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n\n") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "write failed");
   return eslOK;
 }
 
@@ -387,8 +529,7 @@ main(int argc, char **argv)
   ESL_STOPWATCH   *w  = esl_stopwatch_Create();
   struct cfg_s     cfg;
 
-  /* Set processor specific flags */
-  impl_Init();
+  p7_Init();
 
   cfg.alifile     = NULL;
   cfg.hmmfile     = NULL;
@@ -397,15 +538,18 @@ main(int argc, char **argv)
    */
   process_commandline(argc, argv, &go, &cfg.hmmfile, &cfg.alifile);    
 
-  /* Initialize what we can in the config structure (without knowing the alphabet yet) 
+  /** 
+   * Initialize what we can in the config structure (without knowing the alphabet yet).
+   * Fields controlled by masters are set up in usual_master() or mpi_master()
+   * Fields used by workers are set up in mpi_worker()
    */
-  cfg.ofp         = NULL;	           /* opened in init_master_cfg() */
-  cfg.fmt         = eslMSAFILE_UNKNOWN;     /* autodetect alignment format by default. */ 
-  cfg.afp         = NULL;	           /* created in init_master_cfg() */
-  cfg.abc         = NULL;	           /* created in init_master_cfg() in masters, or in mpi_worker() in workers */
-  cfg.hmmfp       = NULL;	           /* opened in init_master_cfg() */
+  cfg.ofp         = NULL;	           
+  cfg.fmt         = eslMSAFILE_UNKNOWN;    /* autodetect alignment format by default. */ 
+  cfg.afp         = NULL;	           
+  cfg.abc         = NULL;	           
+  cfg.hmmfp       = NULL;	           
   cfg.postmsafile = esl_opt_GetString(go, "-O"); /* NULL by default */
-  cfg.postmsafp   = NULL;                  /* opened in init_master_cfg() */
+  cfg.postmsafp   = NULL;                  
 
   cfg.nali       = 0;		           /* this counter is incremented in masters */
   cfg.nnamed     = 0;		           /* 0 or 1 if a single MSA; == nali if multiple MSAs */
@@ -417,8 +561,11 @@ main(int argc, char **argv)
 
   cfg.use_priors = !esl_opt_GetBoolean(go, "--noprior");
 
-  if (esl_opt_IsOn(go, "--informat")) {
-    cfg.fmt = profillic_esl_msa_EncodeFormat(esl_opt_GetString(go, "--informat"));
+  if( esl_opt_IsUsed(go, "--profillic-amino")||esl_opt_IsUsed(go, "--profillic-dna") ) {
+    cfg.fmt = eslMSAFILE_PROFILLIC;
+  } else if (esl_opt_IsOn(go, "--informat")) {
+    cfg.fmt = eslx_msafile_EncodeFormat(esl_opt_GetString(go, "--informat"));
+
     if (cfg.fmt == eslMSAFILE_UNKNOWN) p7_Fail("%s is not a recognized input sequence file format\n", esl_opt_GetString(go, "--informat"));
   }
 
@@ -456,7 +603,7 @@ main(int argc, char **argv)
   else
 #endif /*HAVE_MPI*/
     {
-      serial_master(go, &cfg);
+      profillic_usual_master(go, &cfg);
       esl_stopwatch_Stop(w);
     }
 
@@ -465,14 +612,13 @@ main(int argc, char **argv)
     esl_stopwatch_Display(cfg.ofp, w, "# CPU time: ");
   }
 
-
   /* Clean up the shared cfg. 
    */
   if (cfg.my_rank == 0) {
     if (esl_opt_IsOn(go, "-o")) { fclose(cfg.ofp); }
-    if (cfg.afp   != NULL) esl_msafile_Close(cfg.afp);
-    if (cfg.abc   != NULL) esl_alphabet_Destroy(cfg.abc);
-    if (cfg.hmmfp != NULL) fclose(cfg.hmmfp);
+    if (cfg.afp)   eslx_msafile_Close(cfg.afp);
+    if (cfg.abc)   esl_alphabet_Destroy(cfg.abc);
+    if (cfg.hmmfp) fclose(cfg.hmmfp);
   }
   esl_getopts_Destroy(go);
   esl_stopwatch_Destroy(w);
@@ -480,94 +626,19 @@ main(int argc, char **argv)
 }
 
 
-/* init_master_cfg()
- * Called by masters, mpi or serial.
- * Already set:
- *    cfg->hmmfile     - command line arg 1
- *    cfg->alifile     - command line arg 2
- *    cfg->postmsafile - option -O (default NULL)
- *    cfg->fmt         - format of alignment file
- * Sets: 
- *    cfg->afp       - open alignment file                
- *    cfg->abc       - digital alphabet
- *    cfg->hmmfp     - open HMM file
- *    cfg->postmsafp - open MSA resave file, or NULL
- *                   
- * Errors in the MPI master here are considered to be "recoverable",
- * in the sense that we'll try to delay output of the error message
- * until we've cleanly shut down the worker processes. Therefore
- * errors return (code, errmsg) by the ESL_FAIL mech.
- */
-static int
-init_master_cfg(const ESL_GETOPTS *go, struct cfg_s *cfg, char *errmsg)
-{
-  int status;
-
-  if (esl_opt_GetString(go, "-o") != NULL) {
-    if ((cfg->ofp = fopen(esl_opt_GetString(go, "-o"), "w")) == NULL) 
-      ESL_FAIL(eslFAIL, errmsg, "Failed to open -o output file %s\n", esl_opt_GetString(go, "-o"));
-  } else cfg->ofp = stdout;
-
-  // See also below, where these are tested again..
-  if (esl_opt_IsUsed(go, "--profillic-amino")) {
-    cfg->fmt = eslMSAFILE_PROFILLIC;
-  }
-  else if (esl_opt_IsUsed(go, "--profillic-dna")) {
-    cfg->fmt = eslMSAFILE_PROFILLIC;
-  }
-  status = esl_msafile_Open(cfg->alifile, cfg->fmt, NULL, &(cfg->afp));
-  if (status == eslENOTFOUND)    ESL_FAIL(status, errmsg, "Alignment file %s doesn't exist or is not readable\n", cfg->alifile);
-  else if (status == eslEFORMAT) ESL_FAIL(status, errmsg, "Couldn't determine format of alignment %s\n", cfg->alifile);
-  else if (status != eslOK)      ESL_FAIL(status, errmsg, "Alignment file open failed with error %d\n", status);
-
-  if      (esl_opt_GetBoolean(go, "--amino"))   cfg->abc = esl_alphabet_Create(eslAMINO);
-  else if (esl_opt_GetBoolean(go, "--dna"))     cfg->abc = esl_alphabet_Create(eslDNA);
-  else if (esl_opt_GetBoolean(go, "--rna"))     cfg->abc = esl_alphabet_Create(eslRNA);
-  else if (esl_opt_IsUsed(go, "--profillic-amino")) {
-    cfg->abc = esl_alphabet_Create(eslAMINO);
-  }
-  else if (esl_opt_IsUsed(go, "--profillic-dna")) {
-    cfg->abc = esl_alphabet_Create(eslDNA);
-  }
-  //else if (esl_opt_IsUsed(go, "--profillic-rna")) cfg->abc = esl_alphabet_Create(eslRNA);
-  else {
-    int type;
-    status = esl_msafile_GuessAlphabet(cfg->afp, &type);
-    if (status == eslEAMBIGUOUS)    ESL_FAIL(status, errmsg, "Failed to guess the bio alphabet used in %s.\nUse --dna, --rna, or --amino option to specify it.", cfg->alifile);
-    else if (status == eslEFORMAT)  ESL_FAIL(status, errmsg, "Alignment file parse failed: %s\n", cfg->afp->errbuf);
-    else if (status == eslENODATA)  ESL_FAIL(status, errmsg, "Alignment file %s is empty\n", cfg->alifile);
-    else if (status != eslOK)       ESL_FAIL(status, errmsg, "Failed to read alignment file %s\n", cfg->alifile);
-    cfg->abc = esl_alphabet_Create(type);
-  }
-  esl_msafile_SetDigital(cfg->afp, cfg->abc);
-
-  if ((cfg->hmmfp = fopen(cfg->hmmfile, "w")) == NULL) ESL_FAIL(status, errmsg, "Failed to open HMM file %s for writing", cfg->hmmfile);
-
-  if (cfg->postmsafile != NULL) {
-    if ((cfg->postmsafp = fopen(cfg->postmsafile, "w")) == NULL) ESL_FAIL(status, errmsg, "Failed to MSA resave file %s for writing", cfg->postmsafile);
-  } else cfg->postmsafp = NULL;
-
-  profillic_output_header(go, cfg);
-
-  /* with msa == NULL, output_result() prints the tabular results header, if needed */
-  output_result(cfg, errmsg, 0, NULL, NULL, NULL, 0.0);
-  return eslOK;
-}
-
-/* serial_master()
- * The serial version of hmmbuild.
+/** 
+ * usual_master()
+ *
+ * The usual version of hmmbuild, serial or threaded
  * For each MSA, build an HMM and save it.
  * 
- * A master can only return if it's successful. All errors are handled immediately and fatally with p7_Fail().
+ * A master can only return if it's successful. 
+ * All errors are handled immediately and fatally with p7_Fail() or equiv.
  */
 static int
-serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
+profillic_usual_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 {
-  int              status;
-
-  int              i;
   int              ncpus    = 0;
-
   int              infocnt  = 0;
   WORKER_INFO     *info     = NULL;
 #ifdef HMMER_THREADS
@@ -575,11 +646,54 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
   ESL_THREADS     *threadObj= NULL;
   ESL_WORK_QUEUE  *queue    = NULL;
 #endif
+  int              i;
+  int              status;
 
-  char             errmsg[eslERRBUFSIZE];
+  /**
+   * <pre> 
+   * Open files, set alphabet.
+   *   cfg->afp       - open alignment file for input
+   *   cfg->abc       - alphabet expected or guessed in ali file
+   *   cfg->hmmfp     - open HMM file for output
+   *   cfg->postmsafp - optional open MSA resave file, or NULL
+   *   cfp->ofp       - optional open output file, or stdout
+   * The mpi_master's version of this is in init_master_cfg(), with
+   * different error handling (necessitated by our MPI design).
+   * </pre>
+   */
+  if      (esl_opt_GetBoolean(go, "--amino")||esl_opt_IsUsed(go, "--profillic-amino"))   cfg->abc = esl_alphabet_Create(eslAMINO);
+  else if (esl_opt_GetBoolean(go, "--dna")||esl_opt_IsUsed(go, "--profillic-dna"))     cfg->abc = esl_alphabet_Create(eslDNA);
+  else if (esl_opt_GetBoolean(go, "--rna"))     cfg->abc = esl_alphabet_Create(eslRNA);
+  else                                          cfg->abc = NULL;
 
-  if ((status = init_master_cfg(go, cfg, errmsg)) != eslOK) p7_Fail(errmsg);
-  
+  // TODO: REMOVE
+  //printf( "Hi from profillic_usual_master(..)!\n" );
+  status = profillic_eslx_msafile_Open(&(cfg->abc), cfg->alifile, NULL, cfg->fmt, NULL, &(cfg->afp));
+  if (status != eslOK) eslx_msafile_OpenFailure(cfg->afp, status);
+
+  cfg->hmmfp = fopen(cfg->hmmfile, "w");
+  if (cfg->hmmfp == NULL) p7_Fail("Failed to open HMM file %s for writing", cfg->hmmfile);
+
+  if (esl_opt_IsUsed(go, "-o")) 
+    {
+      cfg->ofp = fopen(esl_opt_GetString(go, "-o"), "w");
+      if (cfg->ofp == NULL) p7_Fail("Failed to open -o output file %s\n", esl_opt_GetString(go, "-o"));
+    } 
+  else cfg->ofp = stdout;
+
+  if (cfg->postmsafile) 
+    {
+      cfg->postmsafp = fopen(cfg->postmsafile, "w");
+      if (cfg->postmsafp == NULL) p7_Fail("Failed to MSA resave file %s for writing", cfg->postmsafile);
+    } 
+  else cfg->postmsafp = NULL;
+
+  /* Looks like the i/o is set up successfully...
+   * Initial output to the user
+   */
+  profillic_output_header(go, cfg);                                  /* cheery output header                                */
+  output_result(cfg, NULL, 0, NULL, NULL, NULL, 0.0);	   /* tabular results header (with no args, special-case) */
+
 #ifdef HMMER_THREADS
   /* initialize thread data */
   if (esl_opt_IsOn(go, "--cpu")) ncpus = esl_opt_GetInteger(go, "--cpu");
@@ -598,8 +712,28 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
   for (i = 0; i < infocnt; ++i)
     {
       info[i].bg = p7_bg_Create(cfg->abc);
-      info[i].bld = profillic_p7_builder_Create(go, cfg->abc);
-      if (info[i].bld == NULL)  p7_Fail("profillic_p7_builder_Create failed");
+      info[i].bld = p7_builder_Create(go, cfg->abc);
+
+      if (info[i].bld == NULL)  p7_Fail("p7_builder_Create failed");
+
+      //do this here instead of in p7_builder_Create(), because it's an hmmbuild-specific option
+      if ( esl_opt_IsOn(go, "--maxinsertlen") )
+        info[i].bld->max_insert_len    = esl_opt_GetInteger(go, "--maxinsertlen");
+
+      /* Default matrix is stored in the --mx option, so it's always IsOn().
+       * Check --mxfile first; then go to the --mx option and the default.
+       */
+      if ( cfg->abc != NULL && cfg->abc->type == eslAMINO && esl_opt_IsUsed(go, "--single")) {
+        if (esl_opt_IsOn(go, "--mxfile")) status = p7_builder_SetScoreSystem (info[i].bld, esl_opt_GetString(go, "--mxfile"), NULL, esl_opt_GetReal(go, "--popen"), esl_opt_GetReal(go, "--pextend"), info[i].bg);
+        else                              status = p7_builder_LoadScoreSystem(info[i].bld, esl_opt_GetString(go, "--mx"),           esl_opt_GetReal(go, "--popen"), esl_opt_GetReal(go, "--pextend"), info[i].bg);
+        if (status != eslOK) p7_Fail("Failed to set single query seq score system:\n%s\n", info[i].bld->errbuf);
+      }
+
+      /* special arguments for hmmbuild */
+      info[i].bld->w_len      = (go != NULL && esl_opt_IsOn (go, "--w_length")) ?  esl_opt_GetInteger(go, "--w_length"): -1;
+      info[i].bld->w_beta     = (go != NULL && esl_opt_IsOn (go, "--w_beta"))   ?  esl_opt_GetReal   (go, "--w_beta")    : p7_DEFAULT_WINDOW_BETA;
+      if ( info[i].bld->w_beta < 0 || info[i].bld->w_beta > 1  ) esl_fatal("Invalid window-length beta value\n");
+
 #ifdef HMMER_THREADS
       info[i].queue = queue;
       if (ncpus > 0) esl_threads_AddThread(threadObj, &info[i]);
@@ -625,37 +759,34 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 #endif
 
 #ifdef HMMER_THREADS
-  if ((( cfg->afp->format != eslMSAFILE_PROFILLIC )) && (ncpus > 0))  status = thread_loop(threadObj, queue, cfg);
-  else if(cfg->fmt = eslMSAFILE_PROFILLIC) {
-    if( cfg->abc->type == eslDNA ) {
+  if ((( cfg->afp->format != eslMSAFILE_PROFILLIC )) && (ncpus > 0)) {
+    thread_loop(threadObj, queue, cfg, go);
+  } else if(cfg->fmt == eslMSAFILE_PROFILLIC) {  /// TAH 3/12 replace = with ==; make sure it works!
+    if( cfg->abc != NULL && cfg->abc->type == eslDNA ) {
       galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> profile;
-      status = serial_loop(info, cfg, &profile);
-    } else if( cfg->abc->type == eslAMINO ) {
+      profillic_serial_loop(info, cfg, &profile, go);
+    } else if( cfg->abc != NULL && cfg->abc->type == eslAMINO ) {
       galosh::ProfileTreeRoot<seqan::AminoAcid20, floatrealspace> profile;
-      status = serial_loop(info, cfg, &profile);
+      profillic_serial_loop(info, cfg, &profile, go);
     } else {
       ESL_EXCEPTION(eslEUNIMPLEMENTED, "Sorry, at present the profillic-hmmbuild software can only handle amino and dna.");
     }
   } else {
-    status = serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL);
+    profillic_serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL, go);
   }
 #else
   if( cfg->fmt = eslMSAFILE_PROFILLIC ) {
     if( cfg->abc->type == eslDNA ) {
       galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> profile;
-      status = serial_loop(info, cfg, &profile);
+      profillic_serial_loop(info, cfg, &profile, go);
     } else if( cfg->abc->type == eslAMINO ) {
       galosh::ProfileTreeRoot<seqan::AminoAcid20, floatrealspace> profile;
-      status = serial_loop(info, cfg, &profile);
+      profillic_serial_loop(info, cfg, &profile, go);
     }
   } else {
-    status = serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL);
+    profillic_serial_loop(info, cfg, (galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> *)NULL, go);
   }
 #endif
-
-  if      (status == eslEFORMAT) esl_fatal("Alignment file parse error:\n%s\n", cfg->afp->errbuf);
-  else if (status == eslEINVAL)  esl_fatal("Alignment file parse error:\n%s\n", cfg->afp->errbuf);
-  else if (status != eslEOF)     esl_fatal("Alignment file read failed with error code %d\n", status);
 
   for (i = 0; i < infocnt; ++i)
     {
@@ -684,8 +815,10 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 }
 
 #ifdef HAVE_MPI
-/* mpi_master()
+/** 
+ * mpi_master()
  * The MPI version of hmmbuild.
+ *
  * Follows standard pattern for a master/worker load-balanced MPI program (J1/78-79).
  * 
  * A master can only return if it's successful. 
@@ -705,8 +838,6 @@ serial_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 static void
 mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 {
-  int         xstatus       = eslOK;	/* changes from OK on recoverable error */
-  int         status;
   int         have_work     = TRUE;	/* TRUE while alignments remain  */
   int         nproc_working = 0;	        /* number of worker processes working, up to nproc-1 */
   int         wi;          	        /* rank of next worker to get an alignment to work on */
@@ -719,26 +850,69 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
   ESL_MSA    *postmsa       = NULL;
   int        *msaidx        = NULL;
   char        errmsg[eslERRBUFSIZE];
-  MPI_Status  mpistatus; 
   int         n;
   int         pos;
-
   double      entropy;
-  
-  /* Master initialization: including, figure out the alphabet type.
-   * If any failure occurs, delay printing error message until we've shut down workers.
-   */
-  if (xstatus == eslOK) { if ((status = init_master_cfg(go, cfg, errmsg)) != eslOK) xstatus = status; }
-  if (xstatus == eslOK) { bn = 4096; if ((buf = malloc(sizeof(char) * bn)) == NULL) { sprintf(errmsg, "allocation failed"); xstatus = eslEMEM; } }
-  if (xstatus == eslOK) { if ((msalist = malloc(sizeof(ESL_MSA *) * cfg->nproc)) == NULL) { sprintf(errmsg, "allocation failed"); xstatus = eslEMEM; } }
-  if (xstatus == eslOK) { if ((msaidx  = malloc(sizeof(int)       * cfg->nproc)) == NULL) { sprintf(errmsg, "allocation failed"); xstatus = eslEMEM; } }
-  MPI_Bcast(&xstatus, 1, MPI_INT, 0, MPI_COMM_WORLD);
-  if (xstatus != eslOK) {  MPI_Finalize(); p7_Fail(errmsg); }
-  ESL_DPRINTF1(("MPI master is initialized\n"));
+  int         status;
+  int         xstatus       = eslOK;	/* changes from OK on recoverable error */
+  int         rstatus;			/* status specifically from msa read */
+  MPI_Status  mpistatus; 
 
-  bg = p7_bg_Create(cfg->abc);
+  /**
+   * <pre>
+   * Open files, set alphabet.
+   *   cfg->abc       - alphabet expected or guessed in ali file
+   *   cfg->afp       - open alignment file for input
+   *   cfg->hmmfp     - open HMM file for output
+   *   cfp->ofp       - optional open output file, or stdout
+   *   cfg->postmsafp - optional open MSA resave file, or NULL
+   * Error handling requires first broadcasting a non-OK status to workers
+   * to get them to shut down cleanly.
+   * </pre>
+   */
+  if      (esl_opt_GetBoolean(go, "--amino"))   cfg->abc = esl_alphabet_Create(eslAMINO);
+  else if (esl_opt_GetBoolean(go, "--dna"))     cfg->abc = esl_alphabet_Create(eslDNA);
+  else if (esl_opt_GetBoolean(go, "--rna"))     cfg->abc = esl_alphabet_Create(eslRNA);
+  else                                          cfg->abc = NULL;
+
+  status = eslx_msafile_Open(&(cfg->abc), cfg->alifile, NULL, cfg->fmt, NULL, &(cfg->afp));
+  if (status != eslOK) mpi_init_open_failure(cfg->afp, status);
+
+  cfg->hmmfp = fopen(cfg->hmmfile, "w");
+  if (cfg->hmmfp == NULL) mpi_init_other_failure("Failed to open HMM file %s for writing", cfg->hmmfile); 
+  
+  if (esl_opt_IsUsed(go, "-o")) 
+    {
+      cfg->ofp = fopen(esl_opt_GetString(go, "-o"), "w");
+      if (cfg->ofp == NULL) mpi_init_other_failure("Failed to open -o output file %s\n", esl_opt_GetString(go, "-o"));
+    }
+  else cfg->ofp = stdout;
+
+  if (cfg->postmsafile) 
+    {
+      cfg->postmsafp = fopen(cfg->postmsafile, "w");
+      if (cfg->postmsafp == NULL) mpi_init_other_failure("Failed to MSA resave file %s for writing", cfg->postmsafile);
+    }
+  else cfg->postmsafp = NULL;
+
+  /* Other initialization in the master
+   */
+  bn = 4096; 
+  if ((buf     = malloc(sizeof(char) * bn))              == NULL) mpi_init_other_failure("allocation failed"); 
+  if ((msalist = malloc(sizeof(ESL_MSA *) * cfg->nproc)) == NULL) mpi_init_other_failure("allocation failed"); 
+  if ((msaidx  = malloc(sizeof(int)       * cfg->nproc)) == NULL) mpi_init_other_failure("allocation failed"); 
+  if ((bg      = p7_bg_Create(cfg->abc))                 == NULL) mpi_init_other_failure("allocation failed"); 
 
   for (wi = 0; wi < cfg->nproc; wi++) { msalist[wi] = NULL; msaidx[wi] = 0; } 
+
+  /* Looks like the master is initialized successfully...
+   * Tell the workers we're fine; send initial output to the user
+   */
+  xstatus = eslOK;
+  MPI_Bcast(&xstatus, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  output_header(go, cfg);                                  /* cheery output header                                */
+  output_result(cfg, NULL, 0, NULL, NULL, NULL, 0.0);	   /* tabular results header (with no args, special-case) */  
+  ESL_DPRINTF1(("MPI master is initialized\n"));  
 
   /* Worker initialization:
    * Because we've already successfully initialized the master before we start
@@ -752,7 +926,8 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
   ESL_DPRINTF1(("%d workers are initialized\n", cfg->nproc-1));
 
 
-  /* Main loop: combining load workers, send/receive, clear workers loops;
+  /** 
+   * Main loop: combining load workers, send/receive, clear workers loops;
    * also, catch error states and die later, after clean shutdown of workers.
    * 
    * When a recoverable error occurs, have_work = FALSE, xstatus !=
@@ -768,19 +943,10 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
     {
       if (have_work) 
 	{
-	  if ((status = esl_msa_Read(cfg->afp, &msa)) == eslOK) 
-	    {
-	      cfg->nali++;  
-	      ESL_DPRINTF1(("MPI master read MSA %s\n", msa->name == NULL? "" : msa->name));
-	    }
-	  else 
-	    {
-	      have_work = FALSE;
-	      if      (status == eslEFORMAT)  { xstatus = eslEFORMAT; snprintf(errmsg, eslERRBUFSIZE, "Alignment file parse error:\n%s\n", cfg->afp->errbuf); }
-	      else if (status == eslEINVAL)   { xstatus = eslEFORMAT; snprintf(errmsg, eslERRBUFSIZE, "Alignment file parse error:\n%s\n", cfg->afp->errbuf); }
-	      else if (status != eslEOF)      { xstatus = status;     snprintf(errmsg, eslERRBUFSIZE, "Alignment file read unexpectedly failed with code %d\n", status); }
-	      ESL_DPRINTF1(("MPI master has run out of MSAs (having read %d)\n", cfg->nali));
-	    } 
+	  rstatus = eslx_msafile_Read(cfg->afp, &msa);
+	  if      (rstatus == eslOK)  {  cfg->nali++;                            ESL_DPRINTF1(("MPI master read MSA %s\n", msa->name == NULL? "" : msa->name));  } 
+	  else if (rstatus == eslEOF) {  have_work  = FALSE;                     ESL_DPRINTF1(("MPI master has run out of MSAs (having read %d)\n", cfg->nali)); }
+	  else                        {  have_work  = FALSE;  xstatus = rstatus; ESL_DPRINTF1(("MPI master msa read has failed... start to shut down\n")); }
 	}
 
       if ((have_work && nproc_working == cfg->nproc-1) || (!have_work && nproc_working > 0))
@@ -797,7 +963,7 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 	  if (MPI_Recv(buf, bn, MPI_PACKED, wi, 0, MPI_COMM_WORLD, &mpistatus) != 0) { MPI_Finalize(); p7_Fail("mpi recv failed"); }
 	  ESL_DPRINTF1(("MPI master has received the buffer\n"));
 
-	  /* If we're in a recoverable error state, we're only clearing worker results;
+	  /** If we're in a recoverable error state, we're only clearing worker results;
            * just receive them, don't unpack them or print them.
            * But if our xstatus is OK, go ahead and process the result buffer.
 	   */
@@ -845,7 +1011,7 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
 	}
     }
   
-  /* On success or recoverable errors:
+  /** On success or recoverable errors:
    * Shut down workers cleanly. 
    */
   ESL_DPRINTF1(("MPI master is done. Shutting down all the workers cleanly\n"));
@@ -857,11 +1023,49 @@ mpi_master(const ESL_GETOPTS *go, struct cfg_s *cfg)
   free(msalist);
   p7_bg_Destroy(bg);
 
-  if (xstatus != eslOK) { MPI_Finalize(); p7_Fail(errmsg); }
-  else                  return;
+  if      (rstatus != eslOK) { MPI_Finalize(); eslx_msafile_ReadFailure(cfg->afp, rstatus); }
+  else if (xstatus != eslOK) { MPI_Finalize(); p7_Fail(errmsg); }
+  else                        return;
+}
+/**
+ * mpi_init_open_failure
+ *
+ */
+static void
+mpi_init_open_failure(ESLX_MSAFILE *afp, int status)
+{
+  MPI_Bcast(&status, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Finalize();
+  eslx_msafile_OpenFailure(afp, status);
 }
 
+/**
+ * mpi_init_other_failure
+ *
+ */
+static void
+mpi_init_other_failure(char *format, ...)
+{
+  va_list argp;
+  int status = eslFAIL;
 
+  MPI_Bcast(&status, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Finalize();
+  if (fprintf(stderr, "\nError: ") < 0) exit(eslEWRITE);
+
+  va_start(argp, format);
+  if (vfprintf(stderr, format, argp) < 0) exit(eslEWRITE);
+  va_end(argp);
+
+  if (fprintf(stderr, "\n") < 0) exit(eslEWRITE);
+  fflush(stderr);
+  exit(1);
+}
+
+/**
+ * mpi_worker
+ *
+ */
 static void
 mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
 {
@@ -880,6 +1084,7 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
   int           sz, n;		        /* size of a packed message */
   int           pos;
   char          errmsg[eslERRBUFSIZE];
+  ESL_SQ     *sq          = NULL;
 
   /* After master initialization: master broadcasts its status.
    */
@@ -887,7 +1092,7 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
   if (xstatus != eslOK) return; /* master saw an error code; workers do an immediate normal shutdown. */
   ESL_DPRINTF2(("worker %d: sees that master has initialized\n", cfg->my_rank));
   
-  /* Master now broadcasts worker initialization information (alphabet type) 
+  /** Master now broadcasts worker initialization information (alphabet type) 
    * Workers returns their status post-initialization.
    * Initial allocation of wbuf must be large enough to guarantee that
    * we can pack an error result into it, because after initialization,
@@ -897,6 +1102,13 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
   if (xstatus == eslOK) { if ((cfg->abc = esl_alphabet_Create(type))      == NULL)    xstatus = eslEMEM; }
   if (xstatus == eslOK) { wn = 4096;  if ((wbuf = malloc(wn * sizeof(char))) == NULL) xstatus = eslEMEM; }
   if (xstatus == eslOK) { if ((bld = p7_builder_Create(go, cfg->abc))     == NULL)    xstatus = eslEMEM; }
+
+  //special arguments for hmmbuild
+  bld->w_len      = (go != NULL && esl_opt_IsOn (go, "--w_length")) ?  esl_opt_GetInteger(go, "--w_length"): -1;
+  bld->w_beta     = (go != NULL && esl_opt_IsOn (go, "--w_beta"))   ?  esl_opt_GetReal   (go, "--w_beta")    : p7_DEFAULT_WINDOW_BETA;
+  if ( bld->w_beta < 0 || bld->w_beta > 1  ) goto ERROR;
+
+
   MPI_Reduce(&xstatus, &status, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD); /* everyone sends xstatus back to master */
   if (xstatus != eslOK) {
     if (wbuf != NULL) free(wbuf);
@@ -913,7 +1125,18 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
     {
       /* Build the HMM */
       ESL_DPRINTF2(("worker %d: has received MSA %s (%d columns, %d seqs)\n", cfg->my_rank, msa->name, msa->alen, msa->nseq));
-      if ((status = profillic_p7_Builder(bld, msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, bg, &hmm, NULL, NULL, NULL, postmsa_ptr), cfg->use_priors) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
+
+      if ( msa->nseq > 1 || cfg->abc->type != eslAMINO || !esl_opt_IsUsed(go, "--single")) {
+        if ((status = profillic_p7_Builder(bld, msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, bg, &hmm, NULL, NULL, NULL, postmsa_ptr, cfg->use_priors)) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
+      } else {
+        //for protein, single sequence, use blosum matrix:
+        sq = esl_sq_CreateDigital(cfg->abc);
+        if ((status = esl_sq_FetchFromMSA(msa, 0, &sq)) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
+        if ((status = p7_SingleBuilder(bld, sq, bg, &hmm, NULL, NULL, NULL)) != eslOK) { strcpy(errmsg, bld->errbuf); goto ERROR; }
+        esl_sq_Destroy(sq);
+        sq = NULL;
+        hmm->eff_nseq = 1;
+      }
 
       ESL_DPRINTF2(("worker %d: has produced an HMM %s\n", cfg->my_rank, hmm->name));
 
@@ -956,13 +1179,17 @@ mpi_worker(const ESL_GETOPTS *go, struct cfg_s *cfg)
 }
 #endif /*HAVE_MPI*/
 
-
+/**
+ * profillic_serial_loop
+ *
+ */
 template <class ProfileType>
-static int
-serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr)
+static void
+profillic_serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr, const ESL_GETOPTS *go)
 {
   P7_BUILDER *bld         = NULL;
   ESL_MSA    *msa         = NULL;
+  ESL_SQ     *sq          = NULL;
   ESL_MSA    *postmsa     = NULL;
   ESL_MSA   **postmsa_ptr = (cfg->postmsafile != NULL) ? &postmsa : NULL;
   P7_HMM     *hmm         = NULL;
@@ -972,15 +1199,29 @@ serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr)
   double      entropy;
 
   cfg->nali = 0;
+  // TODO: REMOVE!
+  //printf( "HI from serial_loop!\n" );
   // Note weird hack to make sure we only try to read the profile in once.  TODO: Why doesn't EOF signal it?
-  while ( ( ( cfg->afp->format == eslMSAFILE_PROFILLIC) ? ( cfg->nali == 0 ) : 1 ) && ( (status = profillic_esl_msa_Read(cfg->afp, &msa, profile_ptr)) == eslOK) )
+  while ( ( ( cfg->afp->format == eslMSAFILE_PROFILLIC) ? ( cfg->nali == 0 ) : 1 ) && ( (status = profillic_eslx_msafile_Read(cfg->afp, &msa, profile_ptr)) != eslEOF) )
     {
+      if (status != eslOK) eslx_msafile_ReadFailure(cfg->afp, status);
       cfg->nali++;  
 
       if ((status = set_msa_name(cfg, errmsg, msa)) != eslOK) p7_Fail("%s\n", errmsg); /* cfg->nnamed gets incremented in this call */
 
-      if ((status = profillic_p7_Builder(info->bld, msa, profile_ptr, info->bg, &hmm, NULL, NULL, NULL, postmsa_ptr, info->use_priors)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
 
+      /*         bg   new-HMM trarr gm   om  */
+      if ( msa->nseq > 1 || (cfg->abc != NULL && cfg->abc->type != eslAMINO) || !esl_opt_IsUsed(go, "--single")) {
+        if ((status = profillic_p7_Builder(info->bld, msa, profile_ptr, info->bg, &hmm, NULL, NULL, NULL, postmsa_ptr, info->use_priors)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
+      } else {
+        //for protein, single sequence, use blosum matrix:
+        sq = esl_sq_CreateDigital(cfg->abc);
+        if ((status = esl_sq_FetchFromMSA(msa, 0, &sq)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
+        if ((status = p7_SingleBuilder(info->bld, sq, info->bg, &hmm, NULL, NULL, NULL)) != eslOK) p7_Fail("build failed: %s", bld->errbuf);
+        esl_sq_Destroy(sq);
+        sq = NULL;
+        hmm->eff_nseq = 1;
+      }
       entropy = p7_MeanMatchRelativeEntropy(hmm, info->bg);
       if ((status = output_result(cfg, errmsg, cfg->nali, msa, hmm, postmsa, entropy))         != eslOK) p7_Fail(errmsg);
 
@@ -988,17 +1229,17 @@ serial_loop(WORKER_INFO *info, struct cfg_s *cfg, ProfileType * profile_ptr)
       esl_msa_Destroy(msa);
       esl_msa_Destroy(postmsa);
     }
-
-  // Note weird hack to make sure we only try to read the profillic profile in once.  TODO: Why doesn't EOF signal it?
-  if( cfg->afp->format == eslMSAFILE_PROFILLIC ) {
-    status = eslEOF;
-  }
-  return status;
+  /// \todo DOPTE ERE I AM.  Now there's no status returned!
+  /// \note weird hack to make sure we only try to read the profillic profile in once.  \todo Why doesn't EOF signal it?
+//  if( cfg->afp->format == eslMSAFILE_PROFILLIC ) {
+//    status = eslEOF;
+//  }
+//  return status;
 }
 
 #ifdef HMMER_THREADS
-static int
-thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg)
+static void
+thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg, const ESL_GETOPTS *go)
 {
   int          status    = eslOK;
   int          sstatus   = eslOK;
@@ -1022,14 +1263,17 @@ thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg)
   /* Main loop: */
   item = (WORK_ITEM *) newItem;
   while (sstatus == eslOK) {
-    sstatus = esl_msa_Read(cfg->afp, &item->msa);
+    sstatus = eslx_msafile_Read(cfg->afp, &item->msa);
     if (sstatus == eslOK) {
       item->nali = ++cfg->nali;
       if (set_msa_name(cfg, errmsg, item->msa) != eslOK) p7_Fail("%s\n", errmsg);
     }
-    if (sstatus == eslEOF && processed < cfg->nali) sstatus = eslOK;
+    else if (sstatus == eslEOF && processed < cfg->nali) sstatus = eslOK;
+    else if (sstatus != eslEOF) 
+      eslx_msafile_ReadFailure(cfg->afp, sstatus);
 	  
     if (sstatus == eslOK) {
+      item->force_single = esl_opt_IsUsed(go, "--single");
       status = esl_workqueue_ReaderUpdate(queue, item, &newItem);
       if (status != eslOK) esl_fatal("Work queue reader failed");
 
@@ -1126,11 +1370,10 @@ thread_loop(ESL_THREADS *obj, ESL_WORK_QUEUE *queue, struct cfg_s *cfg)
       esl_threads_WaitForFinish(obj);
       esl_workqueue_Complete(queue);  
     }
-
-  return sstatus;
+  return;
 
  ERROR:
-  return eslEMEM;
+  p7_Fail("thread_loop failed: memory allocation problem");
 }
 
 static void 
@@ -1144,6 +1387,7 @@ pipeline_thread(void *arg)
 
   WORKER_INFO  *info;
   ESL_THREADS  *obj;
+  ESL_SQ     *sq          = NULL;
 
   obj = (ESL_THREADS *) arg;
   esl_threads_Started(obj, &workeridx);
@@ -1157,8 +1401,23 @@ pipeline_thread(void *arg)
   item = (WORK_ITEM *) newItem;
   while (item->msa != NULL)
     {
-      status = profillic_p7_Builder(info->bld, item->msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, info->bg, &item->hmm, NULL, NULL, NULL, &item->postmsa, info->use_priors);
-      if (status != eslOK) p7_Fail("build failed: %s", info->bld->errbuf);
+
+      if ( item->msa->nseq > 1 || info->bg->abc->type != eslAMINO || !item->force_single) {
+        status = profillic_p7_Builder(info->bld, item->msa, ( galosh::ProfileTreeRoot<seqan::Dna, floatrealspace> * )NULL, info->bg, &item->hmm, NULL, NULL, NULL, &item->postmsa, info->use_priors);
+        if (status != eslOK) p7_Fail("build failed: %s", info->bld->errbuf);
+      } else {
+        //for protein, single sequence, use blosum matrix:
+        sq = esl_sq_CreateDigital(info->bg->abc);
+        status = esl_sq_FetchFromMSA(item->msa, 0, &sq);
+        if (status != eslOK) p7_Fail("build failed: %s", info->bld->errbuf);
+
+        status = p7_SingleBuilder(info->bld, sq, info->bg, &item->hmm, NULL, NULL, NULL);
+        if (status != eslOK) p7_Fail("build failed: %s", info->bld->errbuf);
+
+        esl_sq_Destroy(sq);
+        sq = NULL;
+        item->hmm->eff_nseq = 1;
+      }
 
       item->entropy   = p7_MeanMatchRelativeEntropy(item->hmm, info->bg);
       item->processed = TRUE;
@@ -1177,9 +1436,6 @@ pipeline_thread(void *arg)
 }
 #endif   /* HMMER_THREADS */
  
-
-
-
 static int
 output_result(const struct cfg_s *cfg, char *errbuf, int msaidx, ESL_MSA *msa, P7_HMM *hmm, ESL_MSA *postmsa, double entropy)
 {
@@ -1191,27 +1447,29 @@ output_result(const struct cfg_s *cfg, char *errbuf, int msaidx, ESL_MSA *msa, P
    */
   if (msa == NULL)
     {
-      fprintf(cfg->ofp, "#%4s %-20s %5s %5s %5s %8s %6s %s\n", " idx", "name",                 "nseq",  "alen",  "mlen",  "eff_nseq",  "re/pos",  "description");
-      fprintf(cfg->ofp, "#%4s %-20s %5s %5s %5s %8s %6s %s\n", "----", "--------------------", "-----", "-----", "-----", "--------",  "------",  "-----------");
+      if (fprintf(cfg->ofp, "#%4s %-20s %5s %5s %5s %5s %8s %6s %s\n", " idx", "name",                 "nseq",  "alen",  "mlen",  "W", "eff_nseq",  "re/pos",  "description")     < 0) ESL_EXCEPTION_SYS(eslEWRITE, "output_result: write failed");
+      if (fprintf(cfg->ofp, "#%4s %-20s %5s %5s %5s %5s %8s %6s %s\n", "----", "--------------------", "-----", "-----", "-----", "-----", "--------",  "------",  "-----------") < 0) ESL_EXCEPTION_SYS(eslEWRITE, "output_result: write failed");
       return eslOK;
     }
 
-  if ((status = p7_hmm_Validate(hmm, errbuf, 0.0001))       != eslOK) return status;
+//  if ((status = p7_hmm_Validate(hmm, errbuf, 0.0001))       != eslOK) return status;
   if ((status = p7_hmmfile_WriteASCII(cfg->hmmfp, -1, hmm)) != eslOK) ESL_FAIL(status, errbuf, "HMM save failed");
   
-	             /* #   name nseq alen M eff_nseq re/pos description*/
-  fprintf(cfg->ofp, "%-5d %-20s %5d %5ld %5d %8.2f %6.3f %s\n",
-	  msaidx,
-	  (msa->name != NULL) ? msa->name : "",
-	  msa->nseq,
-	  ( long )msa->alen,
-	  hmm->M,
-	  hmm->eff_nseq,
-	  entropy,
-	  ( (msa->desc != NULL) ? msa->desc : "" ) );
+	             /* #   name nseq alen M max_length eff_nseq re/pos description */
+  if (fprintf(cfg->ofp, "%-5d %-20s %5d %5" PRId64 " %5d %5d %8.2f %6.3f %s\n",
+	      msaidx,
+	      (msa->name != NULL) ? msa->name : "",
+	      msa->nseq,
+	      msa->alen,
+	      hmm->M,
+	      hmm->max_length,
+	      hmm->eff_nseq,
+	      entropy,
+	      (msa->desc != NULL) ? msa->desc : "") < 0)
+    ESL_EXCEPTION_SYS(eslEWRITE, "output_result: write failed");
   
   if (cfg->postmsafp != NULL && postmsa != NULL) {
-    esl_msa_Write(cfg->postmsafp, postmsa, eslMSAFILE_STOCKHOLM);
+    eslx_msafile_Write(cfg->postmsafp, postmsa, eslMSAFILE_STOCKHOLM);
   }
 
   return eslOK;
@@ -1219,7 +1477,10 @@ output_result(const struct cfg_s *cfg, char *errbuf, int msaidx, ESL_MSA *msa, P
 
 
 
-/* set_msa_name() 
+/**
+ * <pre> 
+ * set_msa_name() 
+ *
  * Make sure the alignment has a name; this name will
  * then be transferred to the model.
  * 
@@ -1245,6 +1506,7 @@ output_result(const struct cfg_s *cfg, char *errbuf, int msaidx, ESL_MSA *msa, P
  * alignment 'til we're on the second one, these fatal errors
  * only happen after the first HMM has already been built.
  * Oh well.
+ * </pre>
  */
 static int
 set_msa_name(struct cfg_s *cfg, char *errbuf, ESL_MSA *msa)
@@ -1252,20 +1514,21 @@ set_msa_name(struct cfg_s *cfg, char *errbuf, ESL_MSA *msa)
   char *name = NULL;
   int   status;
 
+  assert(cfg != NULL && msa != NULL);
   if (cfg->do_mpi == FALSE && cfg->nali == 1) /* first (only?) HMM in file: */
     {
       if  (cfg->hmmName != NULL)
 	{
-	  if ((status = esl_msa_SetName(msa, cfg->hmmName)) != eslOK) return status;
+	  if ((status = esl_msa_SetName(msa, cfg->hmmName, -1)) != eslOK) return status;
 	}
       else if (msa->name != NULL) 
 	{
 	  cfg->nnamed++;
 	}
-      else if (! cfg->afp->do_stdin)
+      else if (cfg->afp->bf->filename)
 	{
-	  if ((status = esl_FileTail(cfg->afp->fname, TRUE, &name)) != eslOK) return status; /* TRUE=nosuffix */	  
-	  if ((status = esl_msa_SetName(msa, name))                 != eslOK) return status;
+	  if ((status = esl_FileTail(cfg->afp->bf->filename, TRUE, &name)) != eslOK) return status; /* TRUE=nosuffix */	  
+	  if ((status = esl_msa_SetName(msa, name, -1))                    != eslOK) return status;
 	  free(name);
 	}
       else ESL_FAIL(eslEINVAL, errbuf, "Failed to set model name: msa has no name, no msa filename, and no -n");
@@ -1284,11 +1547,5 @@ set_msa_name(struct cfg_s *cfg, char *errbuf, ESL_MSA *msa)
 }
 
 /*****************************************************************
- * HMMER - Biological sequence analysis with profile HMMs
- * Version 3.0; March 2010
- * Copyright (C) 2010 Howard Hughes Medical Institute.
- * Other copyrights also apply. See the COPYRIGHT file for a full list.
- * 
- * HMMER is distributed under the terms of the GNU General Public License
- * (GPLv3). See the LICENSE file for details.
+ * @LICENSE@
  *****************************************************************/

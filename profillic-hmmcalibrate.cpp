@@ -1,10 +1,21 @@
-/* hmmstat: display summary statistics for an HMM database.
- * 
- * Example:
- *  ./hmmstat Pfam
- *  
- * SRE, Thu May 24 11:18:20 2007
- * SVN $Id: hmmstat.c 3152 2010-02-07 22:55:22Z eddys $
+/**
+ * \file profillic-hmmcalibrate.cpp
+ * \brief Calibrate HMM search statistics 
+ * \details
+ * <pre>
+# profillic-hmmcalibrate :: calibrate HMM search statistics
+# profillic-hmmer 1.0a (July 2011); http://galosh.org/
+# Copyright (C) 2011 Paul T. Edlefsen, Fred Hutchinson Cancer Research Center.
+# HMMER 3.1dev (November 2011); http://hmmer.org/
+# Copyright (C) 2011 Howard Hughes Medical Institute.
+# Freely distributed under the GNU General Public License (GPLv3).
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+Usage: profillic-hmmcalibrate [-options] <input hmmfile> <output hmmfile>
+
+Options:
+  -h         : show brief help on version and usage
+  --seed <n> : set RNG seed to <n> (if 0: one-time arbitrary seed)  [42]  (n>=0)
+ * </pre>
  */
 extern "C" {
 #include "p7_config.h"
@@ -18,28 +29,32 @@ extern "C" {
 extern "C" {
 #include "easel.h"
 #include "esl_getopts.h"
-
+  /// \note TAH 8/12 Workaround to avoid use of C++ keyword "new" in esl_msa.h
+#define new _new
 #include "hmmer.h"
+#undef new
 }
 
-/////////////// For profillic-hmmer //////////////////////////////////
+/* ////////////// For profillic-hmmer ///////////////////////////////// */
 #include "profillic-hmmer.hpp"
 //#include "profillic-p7_builder.hpp"
 
-/// Updated notices:
+// Updated notices:
 #define PROFILLIC_HMMER_VERSION "1.0a"
 #define PROFILLIC_HMMER_DATE "July 2011"
 #define PROFILLIC_HMMER_COPYRIGHT "Copyright (C) 2011 Paul T. Edlefsen, Fred Hutchinson Cancer Research Center."
 #define PROFILLIC_HMMER_URL "http://galosh.org/"
 
-/// Modified from hmmer.c p7_banner(..):
+// Modified from hmmer.c p7_banner(..):
 /* Version info - set once for whole package in configure.ac
  */
 /*****************************************************************
  * 1. Miscellaneous functions for H3
  *****************************************************************/
 
-/* Function:  p7_banner()
+/**
+ * <pre> 
+ * Function:  p7_banner()
  * Synopsis:  print standard HMMER application output header
  * Incept:    SRE, Wed May 23 10:45:53 2007 [Janelia]
  *
@@ -77,6 +92,7 @@ extern "C" {
  *    HMMER_LICENSE   "Freely licensed under the Janelia Software License."
  *
  * Returns:   (void)
+ * </pre>
  */
 void
 profillic_p7_banner(FILE *fp, char *progname, char *banner)
@@ -96,7 +112,7 @@ profillic_p7_banner(FILE *fp, char *progname, char *banner)
   if (appname != NULL) free(appname);
   return;
 }
-/////////////// End profillic-hmmer //////////////////////////////////
+/* ////////////// End profillic-hmmer ////////////////////////////////// */
 
 static ESL_OPTIONS options[] = {
   /* name           type      default  env  range     toggles   reqs   incomp  help   docgroup*/
@@ -107,11 +123,14 @@ static ESL_OPTIONS options[] = {
 
 static char usage[]  = "[-options] <input hmmfile> <output hmmfile>";
 static char banner[] = "calibrate HMM search statistics";
-
+/**
+ * int main(int argc, char **argv) 
+ * main driver
+ *
+ */
 int
 main(int argc, char **argv)
 {
-  int status;
   ESL_GETOPTS     *go	   = NULL;      /* command line processing                   */
   ESL_ALPHABET    *abc     = NULL;
   char            *hmmfile = NULL;
@@ -123,6 +142,8 @@ main(int argc, char **argv)
   int              nhmm;	
   double           x;
   float            KL;
+  int              status;
+  char             errbuf[eslERRBUFSIZE];
 
   char        errmsg[eslERRBUFSIZE];
 
@@ -146,7 +167,7 @@ main(int argc, char **argv)
     {
       profillic_p7_banner(stdout, argv[0], banner);
       esl_usage(stdout, argv[0], usage);
-      puts("\nwhere options are:");
+      puts("\nOptions:");
       esl_opt_DisplayHelp(stdout, go, 0, 2, 80); /* 0=docgroup, 2 = indentation; 80=textwidth*/
       exit(0);
     }
@@ -182,10 +203,10 @@ main(int argc, char **argv)
   
   /* Initializations: open the input HMM file for reading
    */
-  status = p7_hmmfile_Open(hmmfile, NULL, &hfp);
-  if      (status == eslENOTFOUND) p7_Fail("Failed to open HMM file %s for reading.\n",                   hmmfile);
-  else if (status == eslEFORMAT)   p7_Fail("File %s does not appear to be in a recognized HMM format.\n", hmmfile);
-  else if (status != eslOK)        p7_Fail("Unexpected error %d in opening HMM file %s.\n",       status, hmmfile);  
+  status = p7_hmmfile_OpenE(hmmfile, NULL, &hfp, errbuf);
+  if      (status == eslENOTFOUND) p7_Fail("File existence/permissions problem in trying to open HMM file %s.\n%s\n", hmmfile, errbuf);
+  else if (status == eslEFORMAT)   p7_Fail("File format problem in trying to open HMM file %s.\n%s\n",                hmmfile, errbuf);
+  else if (status != eslOK)        p7_Fail("Unexpected error %d in opening HMM file %s.\n%s\n",               status, hmmfile, errbuf);  
 
   /* Initializations: open the output HMM file for writing
    */
@@ -217,7 +238,7 @@ main(int argc, char **argv)
 
       if (bg == NULL) bg = p7_bg_Create(abc);
 
-      // TODO: Add use of profillic-p7_builder and command-line args to control calibration.
+      /// \todo Add use of profillic-p7_builder and command-line args to control calibration.
       if ((status = p7_Calibrate(hmm, NULL, &r, &bg, NULL, NULL)) != eslOK) esl_fatal("Unexpected error in calibrating the hmm");
 
       if( do_reseeding ) {
