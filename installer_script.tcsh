@@ -31,9 +31,13 @@ git clone git://github.com/galosh/profuse.git
 git clone git://github.com/pedlefsen/HMMoC-BFloat-Algebra.git 
 git clone git://github.com/galosh/profillic-hmmer
 
+cd HMMoC-BFloat-Algebra/
+make
+cd ..
+
 cd profillic
-ln -s $BOOSTLIB boost-lib
-ln -s $BOOSTINC boost-include
+ln -s /usr/local/lib boost-lib
+ln -s /usr/local/include boost-include
 ln -s ../prolific
 ln -s ../HMMoC-BFloat-Algebra
 ln -s ../seqan-trunk
@@ -41,8 +45,8 @@ bjam install release
 cd ..
 
 cd profuse
-ln -s $BOOSTLIB boost-lib
-ln -s $BOOSTINC boost-include
+ln -s /usr/local/lib boost-lib
+ln -s /usr/local/include boost-include
 ln -s ../prolific
 ln -s ../HMMoC-BFloat-Algebra
 ln -s ../seqan-trunk
@@ -56,8 +60,8 @@ make
 cd ..
 
 cd profillic-hmmer
-ln -s $BOOSTLIB boost-lib
-ln -s $BOOSTINC boost-include
+ln -s /usr/local/lib boost-lib
+ln -s /usr/local/include boost-include
 ln -s ../hmmer
 ln -s ../seqan-trunk
 ln -s ../prolific
