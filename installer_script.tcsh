@@ -1,4 +1,4 @@
-#!/bin/tcsh
+#!/bin/tcsh -x
 
 ### We begin by assuming that you are presently in the parent dir where you'll like all of the profillic-related subdirs to reside.  eg
 # mkdir profillic-dirs
@@ -36,8 +36,8 @@ make
 cd ..
 
 cd profillic
-ln -s /usr/local/lib boost-lib
-ln -s /usr/local/include boost-include
+ln -s $BOOSTLIB boost-lib
+ln -s $BOOSTINC boost-include
 ln -s ../prolific
 ln -s ../HMMoC-BFloat-Algebra
 ln -s ../seqan-trunk
@@ -45,8 +45,8 @@ bjam install release
 cd ..
 
 cd profuse
-ln -s /usr/local/lib boost-lib
-ln -s /usr/local/include boost-include
+ln -s $BOOSTLIB boost-lib
+ln -s $BOOSTINC boost-include
 ln -s ../prolific
 ln -s ../HMMoC-BFloat-Algebra
 ln -s ../seqan-trunk
@@ -60,11 +60,12 @@ make
 cd ..
 
 cd profillic-hmmer
-ln -s /usr/local/lib boost-lib
-ln -s /usr/local/include boost-include
+ln -s $BOOSTLIB boost-lib
+ln -s $BOOSTINC boost-include
 ln -s ../hmmer
 ln -s ../seqan-trunk
 ln -s ../prolific
 ln -s ../HMMoC-BFloat-Algebra
 make
 cd ..
+
