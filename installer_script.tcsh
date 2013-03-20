@@ -19,6 +19,9 @@ autoconf --version
 setenv BOOSTLIB /usr/local/lib
 setenv BOOSTINC /usr/local/include
 #setenv HMMER2 ~/src/profuse-hmmer
+#
+# uncomment and modify this line if bjam (or the wrong bjam) is on PATH
+# alias bjam /usr/bin/bjam
 
 ## Download latest seqan (follow instructions at http://trac.seqan.de/wiki/Tutorial/GettingStarted) to get the latest update from the seqan trunk  - here's what I do:
 svn co http://svn.seqan.de/seqan/trunk seqan-trunk
